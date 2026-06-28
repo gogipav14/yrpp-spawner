@@ -136,6 +136,8 @@ namespace Bridge
     void OnFrame();
     // Read the ACT mapping and inject this frame's action into EventClass::OutList.
     void DispatchACTFrame();
+    // One-shot: dump the buildable type tables to type_catalog.csv (name <-> rtti/index).
+    void DumpCatalogOnce();
     // Release the shared-memory mappings (optional; OS reclaims on process exit).
     void Shutdown();
 }

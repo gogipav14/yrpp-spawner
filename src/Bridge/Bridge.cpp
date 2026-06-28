@@ -88,6 +88,8 @@ void Bridge::OnFrame()
     if (!EnsureMapping())
         return;
 
+    Bridge::DumpCatalogOnce();   // one-shot type-table dump (no-op after first call)
+
     BridgeOBS* o = g_obs;
 
     // --- body first; frame_seq is published LAST (see barrier below) ---
