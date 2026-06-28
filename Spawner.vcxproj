@@ -66,6 +66,9 @@
     <!-- Utilities -->
     <ClCompile Include="$(ThisDir)\src\Utilities\Debug.cpp" />
     <ClCompile Include="$(ThisDir)\src\Utilities\Patch.cpp" />
+    <!-- Bridge (jax-gemma observation/action bridge) -->
+    <ClCompile Include="$(ThisDir)\src\Bridge\Bridge.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Bridge\Bridge.Hook.cpp" />
     <!-- Dialogs -->
     <ResourceCompile Include="$(ThisDir)\src\UI\MultiplayerGameOptionsDialog.rc" />
   </ItemGroup>
@@ -93,6 +96,8 @@
     <ClInclude Include="$(ThisDir)\src\Utilities\DumperTypes.h" />
     <ClInclude Include="$(ThisDir)\src\Utilities\Macro.h" />
     <ClInclude Include="$(ThisDir)\src\Utilities\Patch.h" />
+    <!-- Bridge -->
+    <ClInclude Include="$(ThisDir)\src\Bridge\Bridge.h" />
   </ItemGroup>
   <Import Project="$(PrivateDir)\SpawnerPrivate.props"
           Condition="$(Configuration.Contains('Hardened'))"/>
