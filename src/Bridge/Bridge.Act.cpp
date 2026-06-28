@@ -130,9 +130,23 @@ namespace
         return ACT_OK;
     }
 
-    // SELL / SET_PRIMARY use the Target EventClass ctor (int id, int rtti) @0x4C65E0, but it is
-    // ambiguous in YRpp with an (int, const int&) overload. Deferred to a later cut (needs a
-    // disambiguating wrapper or the Mission::Selling path). Not on the PRODUCE critical path.
+    // DEPLOY / SELL / SET_PRIMARY share a {TargetClass Whom} payload, but the Target EventClass ctor
+    // (int,EventType,int,int) @0x4C65E0 is AMBIGUOUS in YRpp with an (int,EventType,int,const int&)
+    // overload. Sidestep it: build the event from a known-good ctor (Produce), then overwrite Type +
+    // Whom. The DEPLOY/SELL/PRIMARY union members all begin with TargetClass Whom at the same offset,
+    // so one helper serves all three. The engine handler reads only Whom; leftover union bytes ignored.
+    ActResult EmitWhomEvent(HouseClass* pAgent, EventType type, TechnoClass* pT)
+    {
+        if (!pT || pT->Owner != pAgent)
+            return ACT_BAD_TARGET;
+        EventClass ev(pAgent->ArrayIndex, EventType::Produce, 0, 0, FALSE);  // known-good base (sets Frame)
+        ev.Type        = type;
+        ev.IsExecuted  = false;
+        ev.HouseIndex  = static_cast<char>(pAgent->ArrayIndex);
+        ev.Deploy.Whom = TargetClass(static_cast<AbstractClass*>(pT));       // aliases Sell/Primary Whom
+        EventClass::OutList.Add(ev);
+        return ACT_OK;
+    }
 
     ActResult DoSuperWeapon(HouseClass* pAgent, const BridgeAction& a)
     {
@@ -153,8 +167,9 @@ namespace
         case ActType::NOOP:         return ACT_NOOP;
         case ActType::PRODUCE:      return DoProduce(pAgent, a);
         case ActType::PLACE:        return DoPlace(pAgent, a);
-        case ActType::SET_PRIMARY:                               // deferred (ambiguous Target ctor)
-        case ActType::SELL:         return ACT_UNSUPPORTED;      // deferred
+        case ActType::DEPLOY:       return EmitWhomEvent(pAgent, EventType::Deploy,  ResolveTechno(a.target_unique));
+        case ActType::SET_PRIMARY:  return EmitWhomEvent(pAgent, EventType::Primary, ResolveTechno(a.target_unique));
+        case ActType::SELL:         return EmitWhomEvent(pAgent, EventType::Sell,    ResolveTechno(a.target_unique));
         case ActType::GROUP_MOVE:   return DoGroupOrder(pAgent, a, false);
         case ActType::GROUP_ATTACK: return DoGroupOrder(pAgent, a, true);
         case ActType::SUPERWEAPON:  return DoSuperWeapon(pAgent, a);
