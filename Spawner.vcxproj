@@ -68,6 +68,7 @@
     <ClCompile Include="$(ThisDir)\src\Utilities\Patch.cpp" />
     <!-- Bridge (jax-gemma observation/action bridge) -->
     <ClCompile Include="$(ThisDir)\src\Bridge\Bridge.cpp" />
+    <ClCompile Include="$(ThisDir)\src\Bridge\Bridge.Act.cpp" />
     <ClCompile Include="$(ThisDir)\src\Bridge\Bridge.Hook.cpp" />
     <!-- Dialogs -->
     <ResourceCompile Include="$(ThisDir)\src\UI\MultiplayerGameOptionsDialog.rc" />
