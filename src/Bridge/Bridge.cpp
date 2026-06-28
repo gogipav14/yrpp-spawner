@@ -3,17 +3,25 @@
 *
 *  Phase 1 OBSERVATION: enumerate the agent house's fog-honored state once per
 *  logic frame and write it into a named shared-memory region. No engine state is
-*  mutated; reads only the agent house's own units + enemies it has discovered
-*  (via the virtual ObjectClass::DiscoveredBy) so there is no maphack.
+*  mutated.
+*
+*  Non-cheat / no-maphack: enemies are emitted ONLY if their cell is currently
+*  revealed to the agent (not shrouded, not fogged) — NOT merely "ever discovered"
+*  (DiscoveredBy is sticky and would leak live positions through fog).
+*  NOTE: Phase 1 assumes the agent house == HouseClass::CurrentPlayer, so the
+*  global cell shroud/fog reflects the agent's view. Per-house visibility for an
+*  arbitrary agent house is a Phase 3 concern.
 */
 #include <windows.h>
 
 #include "Bridge.h"
 
+#include <ScenarioClass.h>         // ScenarioClass::Instance (in-match guard)
 #include <HouseClass.h>
 #include <TechnoClass.h>
 #include <TechnoTypeClass.h>
 #include <ObjectClass.h>
+#include <CellClass.h>             // IsShrouded / IsFogged
 #include <Fundamentals.h>          // Unsorted::CurrentFrame
 #include <Utilities/Debug.h>
 
@@ -22,8 +30,6 @@ namespace
     HANDLE     g_hMap = nullptr;
     BridgeOBS* g_obs  = nullptr;
 
-    // Lazily create the shared-memory mapping on first frame (engine memory is
-    // live by then; doing this in DllMain would be too early).
     bool EnsureMapping()
     {
         if (g_obs)
@@ -45,13 +51,11 @@ namespace
         return true;
     }
 
-    void FillEntity(BridgeEntity& e, TechnoClass* pT)
+    // pType is guaranteed non-null by the caller (technos with no type are skipped),
+    // so GetHealthPercentage()'s internal GetType() cannot fault here.
+    void FillEntity(BridgeEntity& e, TechnoClass* pT, TechnoTypeClass* pType)
     {
-        TechnoTypeClass* pType = pT->GetTechnoType();
-        // ArrayIndex lives on the concrete *TypeClass; GetArrayIndex() is the
-        // generic virtual that dispatches to it. NOTE: index is per-type-array,
-        // so type_id is unique only within an RTTI category (Phase 1b adds category).
-        e.type_id = pType ? pType->GetArrayIndex() : -1;
+        e.type_id = pType->GetArrayIndex();   // per-RTTI-category index (see Bridge.h note)
 
         CellStruct cell = pT->GetMapCoords();
         e.x = cell.X;
@@ -70,16 +74,23 @@ namespace
 
 void Bridge::OnFrame()
 {
-    HouseClass* pAgent = HouseClass::CurrentPlayer;   // local player's house
+    // CRITICAL guard: 0x55DDA0 also fires on the main menu / score screen, where
+    // CurrentPlayer is stale and the object arrays are torn down. Only run inside
+    // an active scenario.
+    if (!ScenarioClass::Instance)
+        return;
+
+    HouseClass* pAgent = HouseClass::CurrentPlayer;
     if (!pAgent)
-        return;                                       // not in a game yet / observer
+        return;
     if (!EnsureMapping())
         return;
 
     BridgeOBS* o = g_obs;
+
+    // --- body first; frame_seq is published LAST (see barrier below) ---
     o->header.magic       = BridgeContract::MAGIC;
     o->header.version     = BridgeContract::VERSION;
-    o->header.frame_seq   = static_cast<uint64_t>(Unsorted::CurrentFrame);
     o->header.house_index = pAgent->ArrayIndex;
     o->header.status      = 0;                         // win/loss reward bits: Phase 3
 
@@ -102,27 +113,39 @@ void Bridge::OnFrame()
         if (!pT || pT->InLimbo)
             continue;
 
+        TechnoTypeClass* pType = pT->GetTechnoType();
+        if (!pType)                                   // transient/no-type object: skip
+            continue;
+
         HouseClass* owner = pT->Owner;
         if (owner == pAgent)
         {
             if (nOwn < BridgeContract::N_OWN)
-                FillEntity(o->own[nOwn++], pT);
-
-            TechnoTypeClass* pType = pT->GetTechnoType();
-            if (pType && pType->Naval)
+                FillEntity(o->own[nOwn++], pT, pType);
+            if (pType->Naval)
                 ++navy;
         }
         else if (owner && !pAgent->IsAlliedWith(owner))
         {
-            // Fog gate: only enemies the agent house has actually discovered.
-            if (pT->DiscoveredBy(pAgent) && nEnemy < BridgeContract::N_ENEMY)
-                FillEntity(o->enemy[nEnemy++], pT);
+            // Current-visibility fog gate (no maphack): the enemy must stand on a
+            // cell the agent can see RIGHT NOW, not one it saw at some point.
+            CellClass* cell = pT->GetCell();
+            if (cell && !cell->IsShrouded() && !cell->IsFogged())
+            {
+                if (nEnemy < BridgeContract::N_ENEMY)
+                    FillEntity(o->enemy[nEnemy++], pT, pType);
+            }
         }
     }
 
-    o->n_own            = nOwn;
-    o->n_enemy          = nEnemy;
+    o->n_own              = nOwn;
+    o->n_enemy            = nEnemy;
     o->globals.owned_navy = navy;
+
+    // Publish: make all body writes visible before bumping the frame counter, so a
+    // Python reader keying on frame_seq never sees a new seq over a half-written body.
+    MemoryBarrier();
+    o->header.frame_seq = static_cast<uint64_t>(Unsorted::CurrentFrame);
 
     // Throttled validation dump (requires -LOG). Compare vs the on-screen game.
     if ((Unsorted::CurrentFrame % 60) == 0)
