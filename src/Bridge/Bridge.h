@@ -15,10 +15,12 @@
 namespace BridgeContract
 {
     constexpr uint32_t MAGIC     = 0x59524252u; // 'YRBR'
-    constexpr uint32_t VERSION   = 2u;          // bumped for Phase 2 (entity+factory+ACT)
+    constexpr uint32_t VERSION   = 3u;          // bumped: + spatial vision grid (the agent's eyes)
     constexpr int      N_OWN     = 256;
     constexpr int      N_ENEMY   = 256;
     constexpr int      N_FACTORY = 16;          // max own factories surfaced
+    constexpr int      GRID_DIM      = 64;      // downsampled spatial grid, H = W = 64
+    constexpr int      GRID_CHANNELS = 7;       // passability,ore,fog,own_units,enemy_units,own_buildings,height
     constexpr char     OBS_NAME[] = "Local\\yr_bridge_obs";
     constexpr char     ACT_NAME[] = "Local\\yr_bridge_act";
 }
@@ -95,6 +97,12 @@ struct BridgeOBS
     BridgeEntity  own[BridgeContract::N_OWN];
     BridgeEntity  enemy[BridgeContract::N_ENEMY];
     BridgeFactory factories[BridgeContract::N_FACTORY];
+    // Spatial vision grid (CHW): grid[channel][gy][gx], each a uint8. Fog-honored (no maphack).
+    // Channels: 0 passability, 1 ore, 2 fog(0 shroud/1 fog/2 visible), 3 own_units,
+    //           4 enemy_units(visible only), 5 own_buildings, 6 height
+    uint8_t       grid[BridgeContract::GRID_CHANNELS][BridgeContract::GRID_DIM][BridgeContract::GRID_DIM];
+    uint16_t      grid_map_w;   // live MapCoordBounds width  in cells (so Python knows the mapped area)
+    uint16_t      grid_map_h;   // live MapCoordBounds height in cells
 };
 
 struct BridgeAction
@@ -126,7 +134,7 @@ static_assert(sizeof(BridgeHeader)  == 24, "BridgeHeader layout changed");
 static_assert(sizeof(BridgeGlobals) == 36, "BridgeGlobals layout changed");
 static_assert(sizeof(BridgeEntity)  == 16, "BridgeEntity layout changed");
 static_assert(sizeof(BridgeFactory) == 12, "BridgeFactory layout changed");
-static_assert(sizeof(BridgeOBS) == 24 + 36 + 8 + 256 * 16 + 256 * 16 + 16 * 12, "BridgeOBS layout changed");
+static_assert(sizeof(BridgeOBS) == 24 + 36 + 8 + 256 * 16 + 256 * 16 + 16 * 12 + 7 * 64 * 64 + 4, "BridgeOBS layout changed");
 static_assert(sizeof(BridgeAction)  == 24, "BridgeAction layout changed");
 static_assert(sizeof(BridgeACT) == 24 + 8 + 8 + 4 + 24, "BridgeACT layout changed");
 

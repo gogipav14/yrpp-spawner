@@ -22,6 +22,10 @@
 #include <TechnoTypeClass.h>
 #include <ObjectClass.h>
 #include <CellClass.h>             // IsShrouded / IsFogged
+#include <MapClass.h>              // the cell grid — the agent's spatial vision
+#include <BuildingClass.h>         // cell occupiers (own vs enemy)
+#include <UnitClass.h>
+#include <InfantryClass.h>
 #include <FactoryClass.h>          // per-factory production state (serial-proof)
 #include <Fundamentals.h>          // Unsorted::CurrentFrame
 #include <Utilities/Debug.h>
@@ -178,6 +182,64 @@ void Bridge::OnFrame()
     }
     o->n_factory = nFac;
     o->_pad = 0;
+
+    // --- Spatial vision grid (CHW, fog-honored: the agent's eyes; no maphack) ---
+    // Downsample the live map into a fixed GRID_DIM x GRID_DIM tensor. Enemy occupants
+    // are written ONLY where the cell is visible right now (same gate as the entity loop).
+    {
+        memset(o->grid, 0, sizeof(o->grid));
+        const LTRBStruct& mb = MapClass::Instance.MapCoordBounds;
+        const int minX = mb.Left, minY = mb.Top;
+        int mapW = (mb.Right - mb.Left) + 1;
+        int mapH = (mb.Bottom - mb.Top) + 1;
+        if (mapW < 1) mapW = 1;
+        if (mapH < 1) mapH = 1;
+        o->grid_map_w = static_cast<uint16_t>(mapW);
+        o->grid_map_h = static_cast<uint16_t>(mapH);
+        const int G = BridgeContract::GRID_DIM;
+
+        for (int cy = 0; cy < mapH; ++cy)
+        {
+            int gy = (cy * G) / mapH;
+            if (gy >= G) gy = G - 1;
+            for (int cx = 0; cx < mapW; ++cx)
+            {
+                CellStruct cs;
+                cs.X = static_cast<short>(minX + cx);
+                cs.Y = static_cast<short>(minY + cy);
+                CellClass* c = MapClass::Instance.TryGetCellAt(cs);
+                if (!c)
+                    continue;
+                int gx = (cx * G) / mapW;
+                if (gx >= G) gx = G - 1;
+
+                o->grid[0][gy][gx] = static_cast<uint8_t>((static_cast<int>(c->Passability) * 255) / 7);
+                int ore = c->GetContainedTiberiumValue();
+                if (ore > 255) ore = 255;
+                if (ore > 0 && static_cast<uint8_t>(ore) > o->grid[1][gy][gx]) o->grid[1][gy][gx] = static_cast<uint8_t>(ore);
+                uint8_t fog = c->IsShrouded() ? 0 : (c->IsFogged() ? 1 : 2);
+                if (fog > o->grid[2][gy][gx]) o->grid[2][gy][gx] = fog;
+                int lvl = c->GetLevel();
+                if (lvl < 0) lvl = 0;
+                if (lvl > 255) lvl = 255;
+                o->grid[6][gy][gx] = static_cast<uint8_t>(lvl);
+
+                const bool visibleNow = (fog == 2);
+                if (BuildingClass* bld = c->GetBuilding())
+                    if (bld->Owner == pAgent) o->grid[5][gy][gx] = 255;        // own buildings
+                if (UnitClass* u = c->GetUnit(false))
+                {
+                    if (u->Owner == pAgent) o->grid[3][gy][gx] = 255;          // own units
+                    else if (visibleNow && u->Owner && !pAgent->IsAlliedWith(u->Owner)) o->grid[4][gy][gx] = 255;
+                }
+                if (InfantryClass* inf = c->GetInfantry(false))
+                {
+                    if (inf->Owner == pAgent) o->grid[3][gy][gx] = 255;
+                    else if (visibleNow && inf->Owner && !pAgent->IsAlliedWith(inf->Owner)) o->grid[4][gy][gx] = 255;
+                }
+            }
+        }
+    }
 
     // Publish: make all body writes visible before bumping the frame counter, so a
     // Python reader keying on frame_seq never sees a new seq over a half-written body.
