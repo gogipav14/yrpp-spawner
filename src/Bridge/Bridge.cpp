@@ -137,6 +137,7 @@ namespace
     // previous match can never be read after a restart/load.
     void ResetMatch()
     {
+        Bridge::ResetRuleDump();
         g_agentIdx = -1;
         g_agentPtr = nullptr;
         g_termBits = 0;
@@ -352,6 +353,7 @@ void Bridge::OnFrame()
         return;
 
     Bridge::DumpCatalogOnce();   // one-shot type-table dump (no-op after first call)
+    Bridge::DumpRulesOnce(pAgent);   // one-shot per match rules/AI-script JSON dump
 
     BridgeOBS* o = g_obs;
 

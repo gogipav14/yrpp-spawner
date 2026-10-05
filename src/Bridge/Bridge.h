@@ -12,6 +12,7 @@
 #pragma once
 #include <cstdint>
 
+class HouseClass;
 namespace BridgeContract
 {
     constexpr uint32_t MAGIC     = 0x59524252u; // 'YRBR'
@@ -161,6 +162,9 @@ namespace Bridge
     void DispatchACTFrame();
     // One-shot: dump the buildable type tables to type_catalog.csv (name <-> rtti/index).
     void DumpCatalogOnce();
+    // One-shot per match: rules_types.json / rules_ai.json / ai_scripts.json (read-only engine dump).
+    void DumpRulesOnce(HouseClass* pAgent);
+    void ResetRuleDump();   // re-arm on match reset
     // Release the shared-memory mappings (optional; OS reclaims on process exit).
     void Shutdown();
     // Per-instance mapping names (resolved once from env YR_BRIDGE_ID; legacy names if unset/invalid).
