@@ -13,6 +13,7 @@
 *  arbitrary agent house is a Phase 3 concern.
 */
 #include <windows.h>
+#include <cstdlib>
 
 #include "Bridge.h"
 
@@ -38,7 +39,35 @@ namespace
 
     char g_obsName[96] = {};
     char g_actName[96] = {};
+    char g_frameName[96] = {};
+    char g_goName[96] = {};
     bool g_namesResolved = false;
+
+    // Lockstep config (env, read once with YR_BRIDGE_ID) and runtime state.
+    int      g_stepK         = 0;        // YR_BRIDGE_STEP 1..600; 0 = free-run
+    DWORD    g_stepTimeoutMs = 10000;    // YR_BRIDGE_STEP_TIMEOUT_MS
+    bool     g_uncap         = false;    // YR_BRIDGE_UNCAP=1
+    HANDLE   g_hFrameEv      = nullptr;  // DLL -> Python
+    HANDLE   g_hGoEv         = nullptr;  // Python -> DLL
+    uint32_t g_stepTimeouts  = 0;        // cumulative
+    uint32_t g_stepDecisions = 0;        // per match
+    int      g_lastDecisionFrame = -1;   // dedupe if the frame counter did not advance between passes
+    bool     g_overHandled   = false;    // game_over decision frame already served this match
+    bool     g_timeoutStreak = false;    // a timeout was logged and no go has been seen since
+
+    int ReadEnvInt(const char* name, int def, int lo, int hi, bool* present = nullptr)
+    {
+        char buf[32] = {};
+        DWORD n = GetEnvironmentVariableA(name, buf, sizeof(buf));
+        if (present) *present = (n > 0);
+        if (n == 0 || n >= sizeof(buf))
+            return def;
+        char* end = nullptr;
+        long v = strtol(buf, &end, 10);
+        if (end == buf || *end != '\0' || v < lo || v > hi)
+            return def;
+        return static_cast<int>(v);
+    }
 
     // YR_BRIDGE_ID: [A-Za-z0-9_-], 1..32 chars, else ignored (legacy names).
     void ResolveNames()
@@ -59,14 +88,26 @@ namespace
         {
             wsprintfA(g_obsName, "%s_%s", BridgeContract::OBS_NAME, id);
             wsprintfA(g_actName, "%s_%s", BridgeContract::ACT_NAME, id);
+            wsprintfA(g_frameName, "%s_%s", BridgeContract::FRAME_EVENT_NAME, id);
+            wsprintfA(g_goName, "%s_%s", BridgeContract::GO_EVENT_NAME, id);
         }
         else
         {
             lstrcpyA(g_obsName, BridgeContract::OBS_NAME);
             lstrcpyA(g_actName, BridgeContract::ACT_NAME);
+            lstrcpyA(g_frameName, BridgeContract::FRAME_EVENT_NAME);
+            lstrcpyA(g_goName, BridgeContract::GO_EVENT_NAME);
         }
         Debug::Log("[BRIDGE] mapping names: obs=%s act=%s (YR_BRIDGE_ID %s)\n",
                    g_obsName, g_actName, ok ? "set" : (n ? "invalid, ignored" : "unset"));
+
+        bool present = false;
+        g_stepK = ReadEnvInt("YR_BRIDGE_STEP", 0, 1, 600, &present);   // invalid/0 -> free-run
+        g_stepTimeoutMs = static_cast<DWORD>(ReadEnvInt("YR_BRIDGE_STEP_TIMEOUT_MS", 10000, 1, 3600000));
+        g_uncap = ReadEnvInt("YR_BRIDGE_UNCAP", 0, 0, 1) == 1;
+        Debug::Log("[BRIDGE] lockstep: K=%d (%s) timeout=%lums events=%s,%s uncap=%d\n",
+                   g_stepK, g_stepK ? "on" : (present ? "invalid or 0 -> free-run" : "off"),
+                   static_cast<unsigned long>(g_stepTimeoutMs), g_frameName, g_goName, g_uncap ? 1 : 0);
     }
 
     // Latched agent house + sticky terminal status for the current match.
@@ -100,10 +141,15 @@ namespace
         g_termBits = 0;
         g_lastFrame = -1;
         g_scenario = nullptr;
+        g_stepDecisions = 0;
+        g_lastDecisionFrame = -1;
+        g_overHandled = false;
+        g_timeoutStreak = false;
         if (g_obs)
         {
             PubBegin();
             g_obs->header.status = 0;
+            g_obs->step_decisions = 0;
             PubEnd();
         }
     }
@@ -161,6 +207,23 @@ namespace
         if (g_obs)
             return true;
 
+        // Lockstep events are created BEFORE the OBS mapping so that a client that sees the
+        // mapping can already OpenEvent them. Failure -> fall back to free-run (step_k = 0).
+        if (g_stepK > 0 && !g_hFrameEv)
+        {
+            g_hFrameEv = CreateEventA(nullptr, FALSE, FALSE, g_frameName);   // auto-reset, non-signaled
+            g_hGoEv    = CreateEventA(nullptr, FALSE, FALSE, g_goName);
+            if (!g_hFrameEv || !g_hGoEv)
+            {
+                Debug::Log("[BRIDGE] lockstep event creation failed (err %lu): running free\n",
+                           static_cast<unsigned long>(GetLastError()));
+                if (g_hFrameEv) CloseHandle(g_hFrameEv);
+                if (g_hGoEv)    CloseHandle(g_hGoEv);
+                g_hFrameEv = g_hGoEv = nullptr;
+                g_stepK = 0;
+            }
+        }
+
         g_hMap = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
             0, sizeof(BridgeOBS), Bridge::ObsName());
         if (!g_hMap)
@@ -201,8 +264,8 @@ namespace
 
 void Bridge::OnFrame()
 {
-    // CRITICAL guard: 0x55DDA0 also fires on the main menu / score screen, where
-    // CurrentPlayer is stale and the object arrays are torn down. Only run inside
+    // CRITICAL guard: the hook site is only reached from MainLoop, but menus/score screen/teardown
+    // can still leave CurrentPlayer stale and the object arrays torn down. Only run inside
     // an active scenario.
     const bool inMatch = ScenarioClass::Instance && HouseClass::Array.Count > 0
         && HouseClass::CurrentPlayer;
@@ -262,13 +325,43 @@ void Bridge::OnFrame()
 
     BridgeOBS* o = g_obs;
 
+    // Status is computed EVERY frame (before the decision logic needs it).
+    const uint32_t st = ComputeStatus(pAgent);
+    g_termBits |= (st & 7u);                           // game_over/win/loss are sticky per match
+
+    // Lockstep decision frame: CurrentFrame % K == 0, or the frame where game_over first appears
+    // (so Python sees the final state). After game_over we never block again. A pass that repeats
+    // a frame already served (counter did not advance) is not a new decision.
+    const int curFrame = Unsorted::CurrentFrame;
+    bool decision = false;
+    if (g_stepK > 0)
+    {
+        if (g_termBits & 1u)
+        {
+            if (!g_overHandled)
+            {
+                g_overHandled = true;
+                decision = true;
+            }
+        }
+        else if ((curFrame % g_stepK) == 0 && curFrame != g_lastDecisionFrame)
+            decision = true;
+    }
+    if (decision)
+    {
+        g_lastDecisionFrame = curFrame;
+        ++g_stepDecisions;
+        // Drop stale handshake state: a late "go" from a timed-out frame must not skip this wait,
+        // and a never-consumed "frame" signal must not pre-wake Python for this frame.
+        ResetEvent(g_hFrameEv);
+        WaitForSingleObject(g_hGoEv, 0);
+    }
+
     // --- seqlock: pub_seq odd while we write, even when the whole struct is consistent ---
     PubBegin();
     o->header.magic       = BridgeContract::MAGIC;
     o->header.version     = BridgeContract::VERSION;
     o->header.house_index = pAgent->ArrayIndex;
-    const uint32_t st     = ComputeStatus(pAgent);
-    g_termBits |= (st & 7u);                           // game_over/win/loss are sticky per match
     o->header.status      = g_termBits | (st & 8u);
 
     o->globals.credits         = pAgent->Balance;
@@ -410,7 +503,10 @@ void Bridge::OnFrame()
         }
     }
 
-    o->header.frame_seq = static_cast<uint64_t>(Unsorted::CurrentFrame);
+    o->header.frame_seq = static_cast<uint64_t>(curFrame);
+    o->step_k           = static_cast<uint32_t>(g_stepK);
+    o->step_timeouts    = g_stepTimeouts;
+    o->step_decisions   = g_stepDecisions;
     PubEnd();                    // pub_seq -> even: readers may now accept the snapshot
 
     // Throttled validation dump (requires -LOG). Compare vs the on-screen game.
@@ -425,13 +521,40 @@ void Bridge::OnFrame()
                    navy, static_cast<int>(nOwn), static_cast<int>(nEnemy));
     }
 
-    // Phase 2: read the ACT mapping and inject this frame's action into OutList
-    // (driven from the post-render hook -> ~1-frame latency, acceptable for v1).
+    // Lockstep handshake: OBS for this decision frame is published -> wake Python, then block until
+    // it says "go" (it has written its action) or the timeout elapses. The game thread simply
+    // sleeps here (no message pump), so the window may show "not responding" during a long wait.
+    if (decision)
+    {
+        SetEvent(g_hFrameEv);
+        const DWORD w = WaitForSingleObject(g_hGoEv, g_stepTimeoutMs);
+        if (w == WAIT_OBJECT_0)
+            g_timeoutStreak = false;
+        else
+        {
+            ++g_stepTimeouts;                          // also covers WAIT_FAILED / abandoned
+            if (!g_timeoutStreak)
+            {
+                g_timeoutStreak = true;                // log once per streak
+                Debug::Log("[BRIDGE] lockstep: no go within %lu ms at frame %d (wait=%lu); continuing, "
+                           "will wait again on the next decision frame\n",
+                           static_cast<unsigned long>(g_stepTimeoutMs), curFrame, static_cast<unsigned long>(w));
+            }
+            PubBegin();                                // surface the counter to Python promptly
+            o->step_timeouts = g_stepTimeouts;
+            PubEnd();
+        }
+    }
+
+    // Phase 2: read the ACT mapping and inject this frame's action into OutList. In lockstep this
+    // runs AFTER the go (or timeout), so the action Python wrote for this decision frame is
+    // executed on this very frame; free-run executes whatever is pending, once per logic frame.
     Bridge::DispatchACTFrame();
 }
 
 const char* Bridge::ObsName() { ResolveNames(); return g_obsName; }
 const char* Bridge::ActName() { ResolveNames(); return g_actName; }
+bool Bridge::UncapEnabled() { ResolveNames(); return g_uncap; }
 
 void Bridge::OnScenarioLoad()
 {
@@ -443,4 +566,6 @@ void Bridge::Shutdown()
 {
     if (g_obs)  { UnmapViewOfFile(g_obs); g_obs = nullptr; }
     if (g_hMap) { CloseHandle(g_hMap);    g_hMap = nullptr; }
+    if (g_hFrameEv) { CloseHandle(g_hFrameEv); g_hFrameEv = nullptr; }
+    if (g_hGoEv)    { CloseHandle(g_hGoEv);    g_hGoEv = nullptr; }
 }

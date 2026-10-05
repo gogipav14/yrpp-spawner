@@ -15,7 +15,7 @@
 namespace BridgeContract
 {
     constexpr uint32_t MAGIC     = 0x59524252u; // 'YRBR'
-    constexpr uint32_t VERSION   = 4u;          // v4: + pub_seq publish counter at the END of BridgeOBS (v3: spatial grid)
+    constexpr uint32_t VERSION   = 5u;          // v5: + step_k/step_timeouts/step_decisions before pub_seq (v4: pub_seq seqlock, v3: spatial grid)
     constexpr int      N_OWN     = 256;
     constexpr int      N_ENEMY   = 256;
     constexpr int      N_FACTORY = 16;          // max own factories surfaced
@@ -23,6 +23,9 @@ namespace BridgeContract
     constexpr int      GRID_CHANNELS = 7;       // passability,ore,fog,own_units,enemy_units,own_buildings,height
     constexpr char     OBS_NAME[] = "Local\\yr_bridge_obs";
     constexpr char     ACT_NAME[] = "Local\\yr_bridge_act";
+    // Lockstep (opt-in, env YR_BRIDGE_STEP=K): auto-reset events, same "_<id>" suffix rule as the mappings.
+    constexpr char     FRAME_EVENT_NAME[] = "Local\\yr_bridge_frame";  // DLL -> Python: decision-frame OBS published
+    constexpr char     GO_EVENT_NAME[]    = "Local\\yr_bridge_go";     // Python -> DLL: done, continue
 }
 
 // Action types — MUST match yr_env/contract.py ActionType ordering.
@@ -103,6 +106,10 @@ struct BridgeOBS
     uint8_t       grid[BridgeContract::GRID_CHANNELS][BridgeContract::GRID_DIM][BridgeContract::GRID_DIM];
     uint16_t      grid_map_w;   // live MapCoordBounds width  in cells (so Python knows the mapped area)
     uint16_t      grid_map_h;   // live MapCoordBounds height in cells
+    // v5 lockstep info (always written; step_k==0 means free-run, the other two stay 0).
+    uint32_t      step_k;          // YR_BRIDGE_STEP (1..600) if the lockstep events exist, else 0
+    uint32_t      step_timeouts;   // cumulative go-wait timeouts since process start
+    uint32_t      step_decisions;  // decision frames published in this match (includes this snapshot's frame)
     // Seqlock publish counter: ODD while the DLL is writing this struct, EVEN when consistent.
     // Readers: read pub_seq (retry if odd), copy, re-read; retry if it changed. frame_seq is just
     // the game frame number now. (The ACT region has its own protocol and is untouched.)
@@ -138,14 +145,15 @@ static_assert(sizeof(BridgeHeader)  == 24, "BridgeHeader layout changed");
 static_assert(sizeof(BridgeGlobals) == 36, "BridgeGlobals layout changed");
 static_assert(sizeof(BridgeEntity)  == 16, "BridgeEntity layout changed");
 static_assert(sizeof(BridgeFactory) == 12, "BridgeFactory layout changed");
-static_assert(sizeof(BridgeOBS) == 24 + 36 + 8 + 256 * 16 + 256 * 16 + 16 * 12 + 7 * 64 * 64 + 4 + 8, "BridgeOBS layout changed");
+static_assert(sizeof(BridgeOBS) == 24 + 36 + 8 + 256 * 16 + 256 * 16 + 16 * 12 + 7 * 64 * 64 + 4 + 12 + 8, "BridgeOBS layout changed");
 static_assert(sizeof(BridgeAction)  == 24, "BridgeAction layout changed");
 static_assert(sizeof(BridgeACT) == 24 + 8 + 8 + 4 + 24, "BridgeACT layout changed");
 
 namespace Bridge
 {
-    // Called once per logic frame from the 0x55DDA0 (MainLoop_AfterRender) hook.
-    // Writes OBS, then dispatches one pending ACT action (1-frame latency is fine for v1).
+    // Called exactly once per logic frame from the 0x55DCA3 hook (right after LogicClass::Update
+    // returns inside MainLoop, before CurrentFrame++). Writes OBS, (lockstep: signals + waits on a
+    // decision frame), then dispatches one pending ACT action.
     void OnFrame();
     // Scenario (re)load: drop the latched agent house + sticky outcome bits.
     void OnScenarioLoad();
@@ -158,4 +166,6 @@ namespace Bridge
     // Per-instance mapping names (resolved once from env YR_BRIDGE_ID; legacy names if unset/invalid).
     const char* ObsName();
     const char* ActName();
+    // YR_BRIDGE_UNCAP=1 (opt-in): the 0x55E2B4 hook skips the frame-rate limiter wait.
+    bool UncapEnabled();
 }
