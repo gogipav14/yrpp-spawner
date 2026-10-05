@@ -204,6 +204,7 @@ namespace
 
     bool EnsureMapping()
     {
+        ResolveNames();   // MUST precede any use of g_stepK / g_frameName / g_goName
         if (g_obs)
             return true;
 
@@ -264,6 +265,7 @@ namespace
 
 void Bridge::OnFrame()
 {
+    ResolveNames();   // env config (K, timeout, uncap, names) must be loaded before anything reads it
     // CRITICAL guard: the hook site is only reached from MainLoop, but menus/score screen/teardown
     // can still leave CurrentPlayer stale and the object arrays torn down. Only run inside
     // an active scenario.
@@ -334,6 +336,12 @@ void Bridge::OnFrame()
     // a frame already served (counter did not advance) is not a new decision.
     const int curFrame = Unsorted::CurrentFrame;
     bool decision = false;
+    if (g_stepK > 0 && (!g_hFrameEv || !g_hGoEv))
+    {
+        // Never touch null handles: fall back to free-run.
+        Debug::Log("[BRIDGE] lockstep: K=%d but event handles are null; falling back to free-run\n", g_stepK);
+        g_stepK = 0;
+    }
     if (g_stepK > 0)
     {
         if (g_termBits & 1u)
@@ -532,13 +540,18 @@ void Bridge::OnFrame()
             g_timeoutStreak = false;
         else
         {
-            ++g_stepTimeouts;                          // also covers WAIT_FAILED / abandoned
+            ++g_stepTimeouts;                          // counts every failed wait (timeout or error)
             if (!g_timeoutStreak)
             {
                 g_timeoutStreak = true;                // log once per streak
-                Debug::Log("[BRIDGE] lockstep: no go within %lu ms at frame %d (wait=%lu); continuing, "
-                           "will wait again on the next decision frame\n",
-                           static_cast<unsigned long>(g_stepTimeoutMs), curFrame, static_cast<unsigned long>(w));
+                if (w == WAIT_TIMEOUT)
+                    Debug::Log("[BRIDGE] lockstep: WAIT_TIMEOUT, no go within %lu ms at frame %d; continuing, "
+                               "will wait again on the next decision frame\n",
+                               static_cast<unsigned long>(g_stepTimeoutMs), curFrame);
+                else
+                    Debug::Log("[BRIDGE] lockstep: WAIT ERROR (not a timeout) wait=0x%lX GetLastError=%lu at frame %d; "
+                               "continuing\n", static_cast<unsigned long>(w),
+                               static_cast<unsigned long>(GetLastError()), curFrame);
             }
             PubBegin();                                // surface the counter to Python promptly
             o->step_timeouts = g_stepTimeouts;
