@@ -44,7 +44,8 @@ namespace
     bool g_namesResolved = false;
 
     // Lockstep config (env, read once with YR_BRIDGE_ID) and runtime state.
-    int      g_stepK         = 0;        // YR_BRIDGE_STEP 1..600; 0 = free-run
+    int      g_stepKCfg      = 0;        // YR_BRIDGE_STEP 1..600 as configured; 0 = free-run
+    int      g_stepK         = 0;        // ACTIVE K for this match (0 after a wait failure until the next reset)
     DWORD    g_stepTimeoutMs = 10000;    // YR_BRIDGE_STEP_TIMEOUT_MS
     bool     g_uncap         = false;    // YR_BRIDGE_UNCAP=1
     HANDLE   g_hFrameEv      = nullptr;  // DLL -> Python
@@ -53,7 +54,6 @@ namespace
     uint32_t g_stepDecisions = 0;        // per match
     int      g_lastDecisionFrame = -1;   // dedupe if the frame counter did not advance between passes
     bool     g_overHandled   = false;    // game_over decision frame already served this match
-    bool     g_timeoutStreak = false;    // a timeout was logged and no go has been seen since
 
     int ReadEnvInt(const char* name, int def, int lo, int hi, bool* present = nullptr)
     {
@@ -102,7 +102,8 @@ namespace
                    g_obsName, g_actName, ok ? "set" : (n ? "invalid, ignored" : "unset"));
 
         bool present = false;
-        g_stepK = ReadEnvInt("YR_BRIDGE_STEP", 0, 1, 600, &present);   // invalid/0 -> free-run
+        g_stepKCfg = ReadEnvInt("YR_BRIDGE_STEP", 0, 1, 600, &present);   // invalid/0 -> free-run
+        g_stepK = g_stepKCfg;
         g_stepTimeoutMs = static_cast<DWORD>(ReadEnvInt("YR_BRIDGE_STEP_TIMEOUT_MS", 10000, 1, 3600000));
         g_uncap = ReadEnvInt("YR_BRIDGE_UNCAP", 0, 0, 1) == 1;
         Debug::Log("[BRIDGE] lockstep: K=%d (%s) timeout=%lums events=%s,%s uncap=%d\n",
@@ -144,12 +145,18 @@ namespace
         g_stepDecisions = 0;
         g_lastDecisionFrame = -1;
         g_overHandled = false;
-        g_timeoutStreak = false;
+        // Drop any handshake state left by the previous match BEFORE clearing the published
+        // metadata: an unconsumed frame signal must not wake a client on old data, and a late go
+        // must not release the new match's first decision. Re-arm lockstep if it is configured.
+        if (g_hFrameEv) ResetEvent(g_hFrameEv);
+        if (g_hGoEv)    WaitForSingleObject(g_hGoEv, 0);
+        g_stepK = g_stepKCfg;
         if (g_obs)
         {
             PubBegin();
             g_obs->header.status = 0;
             g_obs->step_decisions = 0;
+            g_obs->step_k = static_cast<uint32_t>(g_stepK);
             PubEnd();
         }
     }
@@ -221,7 +228,7 @@ namespace
                 if (g_hFrameEv) CloseHandle(g_hFrameEv);
                 if (g_hGoEv)    CloseHandle(g_hGoEv);
                 g_hFrameEv = g_hGoEv = nullptr;
-                g_stepK = 0;
+                g_stepK = g_stepKCfg = 0;      // permanent: no events, no lockstep
             }
         }
 
@@ -340,7 +347,7 @@ void Bridge::OnFrame()
     {
         // Never touch null handles: fall back to free-run.
         Debug::Log("[BRIDGE] lockstep: K=%d but event handles are null; falling back to free-run\n", g_stepK);
-        g_stepK = 0;
+        g_stepK = g_stepKCfg = 0;
     }
     if (g_stepK > 0)
     {
@@ -536,24 +543,23 @@ void Bridge::OnFrame()
     {
         SetEvent(g_hFrameEv);
         const DWORD w = WaitForSingleObject(g_hGoEv, g_stepTimeoutMs);
-        if (w == WAIT_OBJECT_0)
-            g_timeoutStreak = false;
-        else
+        if (w != WAIT_OBJECT_0)
         {
+            // First wait failure in this match: leave lockstep until the next match reset. This
+            // avoids a late go for decision N releasing decision N+1 with a stale action.
             ++g_stepTimeouts;                          // counts every failed wait (timeout or error)
-            if (!g_timeoutStreak)
-            {
-                g_timeoutStreak = true;                // log once per streak
-                if (w == WAIT_TIMEOUT)
-                    Debug::Log("[BRIDGE] lockstep: WAIT_TIMEOUT, no go within %lu ms at frame %d; continuing, "
-                               "will wait again on the next decision frame\n",
-                               static_cast<unsigned long>(g_stepTimeoutMs), curFrame);
-                else
-                    Debug::Log("[BRIDGE] lockstep: WAIT ERROR (not a timeout) wait=0x%lX GetLastError=%lu at frame %d; "
-                               "continuing\n", static_cast<unsigned long>(w),
-                               static_cast<unsigned long>(GetLastError()), curFrame);
-            }
-            PubBegin();                                // surface the counter to Python promptly
+            const DWORD err = GetLastError();
+            g_stepK = 0;                               // stop signalling/waiting for this match
+            if (w == WAIT_TIMEOUT)
+                Debug::Log("[BRIDGE] lockstep: WAIT_TIMEOUT, no go within %lu ms at frame %d; "
+                           "leaving lockstep for the rest of this match (step_k=0)\n",
+                           static_cast<unsigned long>(g_stepTimeoutMs), curFrame);
+            else
+                Debug::Log("[BRIDGE] lockstep: WAIT ERROR (not a timeout) wait=0x%lX GetLastError=%lu at frame %d; "
+                           "leaving lockstep for the rest of this match (step_k=0)\n",
+                           static_cast<unsigned long>(w), static_cast<unsigned long>(err), curFrame);
+            PubBegin();                                // surface step_k=0 + counter to Python
+            o->step_k = 0;
             o->step_timeouts = g_stepTimeouts;
             PubEnd();
         }
