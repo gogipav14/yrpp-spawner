@@ -35,13 +35,91 @@ namespace
     HANDLE     g_hMap = nullptr;
     BridgeOBS* g_obs  = nullptr;
 
+    char g_obsName[96] = {};
+    char g_actName[96] = {};
+    bool g_namesResolved = false;
+
+    // YR_BRIDGE_ID: [A-Za-z0-9_-], 1..32 chars, else ignored (legacy names).
+    void ResolveNames()
+    {
+        if (g_namesResolved)
+            return;
+        g_namesResolved = true;
+        char id[64] = {};
+        DWORD n = GetEnvironmentVariableA("YR_BRIDGE_ID", id, sizeof(id));
+        bool ok = (n > 0 && n <= 32);
+        for (DWORD i = 0; ok && i < n; ++i)
+        {
+            char ch = id[i];
+            ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
+                || ch == '_' || ch == '-';
+        }
+        if (ok)
+        {
+            wsprintfA(g_obsName, "%s_%s", BridgeContract::OBS_NAME, id);
+            wsprintfA(g_actName, "%s_%s", BridgeContract::ACT_NAME, id);
+        }
+        else
+        {
+            lstrcpyA(g_obsName, BridgeContract::OBS_NAME);
+            lstrcpyA(g_actName, BridgeContract::ACT_NAME);
+        }
+        Debug::Log("[BRIDGE] mapping names: obs=%s act=%s (YR_BRIDGE_ID %s)\n",
+                   g_obsName, g_actName, ok ? "set" : (n ? "invalid, ignored" : "unset"));
+    }
+
+    // Latched agent house + sticky terminal status for the current match.
+    int      g_agentIdx   = -1;
+    uint32_t g_termBits   = 0;     // sticky game_over/win/loss once observed
+    int      g_lastFrame  = -1;
+
+    // Status bits (bit0 game_over, bit1 win, bit2 loss, bit3 paused). Only state the player
+    // legitimately knows: own defeat/victory, match ended, pause.
+    uint32_t ComputeStatus(HouseClass* pAgent)
+    {
+        uint32_t st = 0;
+        // HouseClass.h:856-859 Defeated / IsGameOver / IsWinner / IsLoser.
+        // MPlayerDefeated sets Defeated; with DefeatedBecomesObserver the house stays
+        // CurrentPlayer and becomes HouseClass::Observer (HouseClass.h:218-225), so these
+        // flags remain readable on the latched house.
+        bool loss = pAgent->Defeated || pAgent->IsLoser;
+        bool win  = pAgent->IsWinner && !loss;
+        if (!loss && !win)
+        {
+            // All opposing, non-neutral houses defeated while we are not (HouseClass.h:746
+            // IsNeutral = Type->MultiplayPassive; IsAlliedWith :235; initial observers excluded).
+            int enemies = 0, alive = 0;
+            DynamicVectorClass<HouseClass*>& hs = HouseClass::Array;
+            for (int i = 0; i < hs.Count; ++i)
+            {
+                HouseClass* h = hs.Items[i];
+                if (!h || h == pAgent || !h->Type || h->IsNeutral() || pAgent->IsAlliedWith(h)
+                    || h->IsInitiallyObserver())
+                    continue;
+                ++enemies;
+                if (!h->Defeated && !h->IsLoser)
+                    ++alive;
+            }
+            if (enemies > 0 && alive == 0)
+                win = true;
+        }
+        bool over = win || loss || pAgent->IsGameOver;
+        if (over)  st |= 1u;
+        if (win)   st |= 2u;
+        if (loss)  st |= 4u;
+        // ScenarioClass.h:143 IsGamePaused
+        if (ScenarioClass::Instance && ScenarioClass::Instance->IsGamePaused)
+            st |= 8u;
+        return st;
+    }
+
     bool EnsureMapping()
     {
         if (g_obs)
             return true;
 
         g_hMap = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
-            0, sizeof(BridgeOBS), BridgeContract::OBS_NAME);
+            0, sizeof(BridgeOBS), Bridge::ObsName());
         if (!g_hMap)
             return false;
 
@@ -86,9 +164,33 @@ void Bridge::OnFrame()
     if (!ScenarioClass::Instance)
         return;
 
-    HouseClass* pAgent = HouseClass::CurrentPlayer;
+    // New match in the same process (frame counter went backwards): drop latched state.
+    if (Unsorted::CurrentFrame < g_lastFrame)
+    {
+        g_agentIdx = -1;
+        g_termBits = 0;
+    }
+    g_lastFrame = Unsorted::CurrentFrame;
+
+    // Latch the agent house on first sight: CurrentPlayer (HouseClass.h:171). After defeat
+    // with DefeatedBecomesObserver CurrentPlayer may be the Observer; keep using the latched
+    // house so loss stays reported. Index is validated against the house array every frame.
+    HouseClass* pAgent = nullptr;
+    if (g_agentIdx >= 0 && g_agentIdx < HouseClass::Array.Count)
+        pAgent = HouseClass::Array.Items[g_agentIdx];
     if (!pAgent)
-        return;
+    {
+        g_agentIdx = -1;
+        pAgent = HouseClass::CurrentPlayer;
+        if (!pAgent)
+            return;
+        g_agentIdx = pAgent->ArrayIndex;
+        if (g_agentIdx < 0 || g_agentIdx >= HouseClass::Array.Count
+            || HouseClass::Array.Items[g_agentIdx] != pAgent)
+        {
+            g_agentIdx = -1;     // not a registered house: don't latch
+        }
+    }
     if (!EnsureMapping())
         return;
 
@@ -100,7 +202,9 @@ void Bridge::OnFrame()
     o->header.magic       = BridgeContract::MAGIC;
     o->header.version     = BridgeContract::VERSION;
     o->header.house_index = pAgent->ArrayIndex;
-    o->header.status      = 0;                         // win/loss reward bits: Phase 3
+    const uint32_t st     = ComputeStatus(pAgent);
+    g_termBits |= (st & 7u);                           // game_over/win/loss are sticky per match
+    o->header.status      = g_termBits | (st & 8u);
 
     o->globals.credits         = pAgent->Balance;
     o->globals.power_output    = pAgent->PowerOutput;
@@ -262,6 +366,9 @@ void Bridge::OnFrame()
     // (driven from the post-render hook -> ~1-frame latency, acceptable for v1).
     Bridge::DispatchACTFrame();
 }
+
+const char* Bridge::ObsName() { ResolveNames(); return g_obsName; }
+const char* Bridge::ActName() { ResolveNames(); return g_actName; }
 
 void Bridge::Shutdown()
 {

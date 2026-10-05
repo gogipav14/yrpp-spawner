@@ -149,4 +149,7 @@ namespace Bridge
     void DumpCatalogOnce();
     // Release the shared-memory mappings (optional; OS reclaims on process exit).
     void Shutdown();
+    // Per-instance mapping names (resolved once from env YR_BRIDGE_ID; legacy names if unset/invalid).
+    const char* ObsName();
+    const char* ActName();
 }

@@ -43,7 +43,7 @@ namespace
             return true;
         // Python is the writer, DLL the reader+acker; both open PAGE_READWRITE.
         g_hActMap = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
-            0, sizeof(BridgeACT), BridgeContract::ACT_NAME);
+            0, sizeof(BridgeACT), Bridge::ActName());
         if (!g_hActMap)
             return false;
         g_act = static_cast<BridgeACT*>(
