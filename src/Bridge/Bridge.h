@@ -15,7 +15,7 @@
 namespace BridgeContract
 {
     constexpr uint32_t MAGIC     = 0x59524252u; // 'YRBR'
-    constexpr uint32_t VERSION   = 3u;          // bumped: + spatial vision grid (the agent's eyes)
+    constexpr uint32_t VERSION   = 4u;          // v4: + pub_seq publish counter at the END of BridgeOBS (v3: spatial grid)
     constexpr int      N_OWN     = 256;
     constexpr int      N_ENEMY   = 256;
     constexpr int      N_FACTORY = 16;          // max own factories surfaced
@@ -103,6 +103,10 @@ struct BridgeOBS
     uint8_t       grid[BridgeContract::GRID_CHANNELS][BridgeContract::GRID_DIM][BridgeContract::GRID_DIM];
     uint16_t      grid_map_w;   // live MapCoordBounds width  in cells (so Python knows the mapped area)
     uint16_t      grid_map_h;   // live MapCoordBounds height in cells
+    // Seqlock publish counter: ODD while the DLL is writing this struct, EVEN when consistent.
+    // Readers: read pub_seq (retry if odd), copy, re-read; retry if it changed. frame_seq is just
+    // the game frame number now. (The ACT region has its own protocol and is untouched.)
+    uint64_t      pub_seq;
 };
 
 struct BridgeAction
@@ -134,7 +138,7 @@ static_assert(sizeof(BridgeHeader)  == 24, "BridgeHeader layout changed");
 static_assert(sizeof(BridgeGlobals) == 36, "BridgeGlobals layout changed");
 static_assert(sizeof(BridgeEntity)  == 16, "BridgeEntity layout changed");
 static_assert(sizeof(BridgeFactory) == 12, "BridgeFactory layout changed");
-static_assert(sizeof(BridgeOBS) == 24 + 36 + 8 + 256 * 16 + 256 * 16 + 16 * 12 + 7 * 64 * 64 + 4, "BridgeOBS layout changed");
+static_assert(sizeof(BridgeOBS) == 24 + 36 + 8 + 256 * 16 + 256 * 16 + 16 * 12 + 7 * 64 * 64 + 4 + 8, "BridgeOBS layout changed");
 static_assert(sizeof(BridgeAction)  == 24, "BridgeAction layout changed");
 static_assert(sizeof(BridgeACT) == 24 + 8 + 8 + 4 + 24, "BridgeACT layout changed");
 
@@ -143,6 +147,8 @@ namespace Bridge
     // Called once per logic frame from the 0x55DDA0 (MainLoop_AfterRender) hook.
     // Writes OBS, then dispatches one pending ACT action (1-frame latency is fine for v1).
     void OnFrame();
+    // Scenario (re)load: drop the latched agent house + sticky outcome bits.
+    void OnScenarioLoad();
     // Read the ACT mapping and inject this frame's action into EventClass::OutList.
     void DispatchACTFrame();
     // One-shot: dump the buildable type tables to type_catalog.csv (name <-> rtti/index).

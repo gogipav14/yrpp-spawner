@@ -11,6 +11,15 @@
 #include <Helpers/Macro.h>   // pulls in Syringe.h (DEFINE_HOOK / EXPORT_FUNC)
 #include "Bridge.h"
 
+// Scenario load (same site the spawner uses to clear UIGameMode on game load,
+// Spawner.Hook.cpp ScenarioClass_Load_Suffix @0x689669). Drops the latched agent/outcome.
+DEFINE_HOOK(0x689669, Bridge_ScenarioLoad, 0x6)
+{
+    (void)R;
+    Bridge::OnScenarioLoad();
+    return 0;
+}
+
 DEFINE_HOOK(0x55DDA0, Bridge_AfterFrame, 0x5)
 {
     (void)R;                 // we read no registers; state is re-derived from globals

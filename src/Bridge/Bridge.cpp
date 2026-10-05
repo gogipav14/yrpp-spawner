@@ -16,7 +16,8 @@
 
 #include "Bridge.h"
 
-#include <ScenarioClass.h>         // ScenarioClass::Instance (in-match guard)
+#include <ScenarioClass.h>
+#include <SessionClass.h>          // IsCampaign (win fallback)         // ScenarioClass::Instance (in-match guard)
 #include <HouseClass.h>
 #include <TechnoClass.h>
 #include <TechnoTypeClass.h>
@@ -72,6 +73,40 @@ namespace
     int      g_agentIdx   = -1;
     uint32_t g_termBits   = 0;     // sticky game_over/win/loss once observed
     int      g_lastFrame  = -1;
+    HouseClass*    g_agentPtr   = nullptr;   // latched house object (identity check)
+    const void*    g_scenario   = nullptr;   // ScenarioClass::Instance seen when latched
+    bool     g_wasInMatch = false;
+
+    // Seqlock writer (see BridgeOBS::pub_seq): odd = writing.
+    void PubBegin()
+    {
+        volatile uint64_t* p = &g_obs->pub_seq;
+        *p = *p + 1;                 // -> odd
+        MemoryBarrier();
+    }
+    void PubEnd()
+    {
+        MemoryBarrier();
+        volatile uint64_t* p = &g_obs->pub_seq;
+        *p = *p + 1;                 // -> even
+    }
+
+    // Drop all per-match state; also clear the published outcome so a stale win/loss from the
+    // previous match can never be read after a restart/load.
+    void ResetMatch()
+    {
+        g_agentIdx = -1;
+        g_agentPtr = nullptr;
+        g_termBits = 0;
+        g_lastFrame = -1;
+        g_scenario = nullptr;
+        if (g_obs)
+        {
+            PubBegin();
+            g_obs->header.status = 0;
+            PubEnd();
+        }
+    }
 
     // Status bits (bit0 game_over, bit1 win, bit2 loss, bit3 paused). Only state the player
     // legitimately knows: own defeat/victory, match ended, pause.
@@ -86,19 +121,27 @@ namespace
         bool win  = pAgent->IsWinner && !loss;
         if (!loss && !win)
         {
-            // All opposing, non-neutral houses defeated while we are not (HouseClass.h:746
-            // IsNeutral = Type->MultiplayPassive; IsAlliedWith :235; initial observers excluded).
+            // Fallback only (IsWinner is authoritative). Mirrors the spawner's match-end rule in
+            // Spawner.Hook.cpp:138-160 (MPlayerDefeated_NoEnemies): houses that are Defeated,
+            // MultiplayPassive (neutral) or the defeated house itself are skipped, and a house
+            // counts as "still on our side" only if IsMutualAlly (HouseClass.h:256-260, both
+            // directions) -- one-way alliances do NOT make an enemy count as an ally.
+            // Initial observers (HouseClass.h:760) are excluded; campaign is excluded
+            // (the spawner hook is skipped for SessionClass::IsCampaign, Spawner.Hook.cpp:117).
             int enemies = 0, alive = 0;
-            DynamicVectorClass<HouseClass*>& hs = HouseClass::Array;
-            for (int i = 0; i < hs.Count; ++i)
+            if (!SessionClass::IsCampaign())
             {
-                HouseClass* h = hs.Items[i];
-                if (!h || h == pAgent || !h->Type || h->IsNeutral() || pAgent->IsAlliedWith(h)
-                    || h->IsInitiallyObserver())
-                    continue;
-                ++enemies;
-                if (!h->Defeated && !h->IsLoser)
-                    ++alive;
+                DynamicVectorClass<HouseClass*>& hs = HouseClass::Array;
+                for (int i = 0; i < hs.Count; ++i)
+                {
+                    HouseClass* h = hs.Items[i];
+                    if (!h || h == pAgent || !h->Type || h->IsNeutral() || h->IsInitiallyObserver()
+                        || pAgent->IsMutualAlly(h))
+                        continue;
+                    ++enemies;
+                    if (!h->Defeated)
+                        ++alive;
+                }
             }
             if (enemies > 0 && alive == 0)
                 win = true;
@@ -161,36 +204,57 @@ void Bridge::OnFrame()
     // CRITICAL guard: 0x55DDA0 also fires on the main menu / score screen, where
     // CurrentPlayer is stale and the object arrays are torn down. Only run inside
     // an active scenario.
-    if (!ScenarioClass::Instance)
-        return;
-
-    // New match in the same process (frame counter went backwards): drop latched state.
-    if (Unsorted::CurrentFrame < g_lastFrame)
+    const bool inMatch = ScenarioClass::Instance && HouseClass::Array.Count > 0
+        && HouseClass::CurrentPlayer;
+    if (!inMatch)
     {
-        g_agentIdx = -1;
-        g_termBits = 0;
+        // Teardown / menu / score screen: forget everything so the next match starts clean.
+        if (g_wasInMatch)
+            ResetMatch();
+        g_wasInMatch = false;
+        return;
     }
+    if (!g_wasInMatch)
+    {
+        ResetMatch();                 // not-in-match -> in-match transition = new scenario
+        g_wasInMatch = true;
+    }
+    // Other new-match signals independent of frame progression: a different scenario object, or
+    // the frame counter going backwards.
+    if (g_scenario && g_scenario != ScenarioClass::Instance)
+        ResetMatch();
+    if (Unsorted::CurrentFrame < g_lastFrame)
+        ResetMatch();
+    g_scenario  = ScenarioClass::Instance;
     g_lastFrame = Unsorted::CurrentFrame;
 
-    // Latch the agent house on first sight: CurrentPlayer (HouseClass.h:171). After defeat
-    // with DefeatedBecomesObserver CurrentPlayer may be the Observer; keep using the latched
-    // house so loss stays reported. Index is validated against the house array every frame.
-    HouseClass* pAgent = nullptr;
-    if (g_agentIdx >= 0 && g_agentIdx < HouseClass::Array.Count)
-        pAgent = HouseClass::Array.Items[g_agentIdx];
-    if (!pAgent)
+    // Latch the agent house on first sight: CurrentPlayer (HouseClass.h:171) is the local
+    // player's house, and stays that house after defeat with DefeatedBecomesObserver
+    // (MakeObserver, HouseClass.h:218, only sets HouseClass::Observer). If CurrentPlayer is ever
+    // a different house than the latched one (load of another game, player switch), re-latch:
+    // the latch must never point at another player's house.
+    if (g_agentPtr && g_agentPtr != HouseClass::CurrentPlayer)
     {
-        g_agentIdx = -1;
-        pAgent = HouseClass::CurrentPlayer;
-        if (!pAgent)
-            return;
-        g_agentIdx = pAgent->ArrayIndex;
-        if (g_agentIdx < 0 || g_agentIdx >= HouseClass::Array.Count
-            || HouseClass::Array.Items[g_agentIdx] != pAgent)
-        {
-            g_agentIdx = -1;     // not a registered house: don't latch
-        }
+        ResetMatch();
+        g_scenario  = ScenarioClass::Instance;
+        g_lastFrame = Unsorted::CurrentFrame;
     }
+    if (!g_agentPtr)
+    {
+        HouseClass* cp = HouseClass::CurrentPlayer;
+        int idx = cp->ArrayIndex;
+        if (idx < 0 || idx >= HouseClass::Array.Count || HouseClass::Array.Items[idx] != cp)
+            return;                   // not a registered house yet
+        g_agentPtr = cp;
+        g_agentIdx = idx;
+    }
+    // The array slot must still hold the latched object.
+    if (g_agentIdx >= HouseClass::Array.Count || HouseClass::Array.Items[g_agentIdx] != g_agentPtr)
+    {
+        ResetMatch();
+        return;
+    }
+    HouseClass* pAgent = g_agentPtr;
     if (!EnsureMapping())
         return;
 
@@ -198,7 +262,8 @@ void Bridge::OnFrame()
 
     BridgeOBS* o = g_obs;
 
-    // --- body first; frame_seq is published LAST (see barrier below) ---
+    // --- seqlock: pub_seq odd while we write, even when the whole struct is consistent ---
+    PubBegin();
     o->header.magic       = BridgeContract::MAGIC;
     o->header.version     = BridgeContract::VERSION;
     o->header.house_index = pAgent->ArrayIndex;
@@ -345,10 +410,8 @@ void Bridge::OnFrame()
         }
     }
 
-    // Publish: make all body writes visible before bumping the frame counter, so a
-    // Python reader keying on frame_seq never sees a new seq over a half-written body.
-    MemoryBarrier();
     o->header.frame_seq = static_cast<uint64_t>(Unsorted::CurrentFrame);
+    PubEnd();                    // pub_seq -> even: readers may now accept the snapshot
 
     // Throttled validation dump (requires -LOG). Compare vs the on-screen game.
     if ((Unsorted::CurrentFrame % 60) == 0)
@@ -369,6 +432,12 @@ void Bridge::OnFrame()
 
 const char* Bridge::ObsName() { ResolveNames(); return g_obsName; }
 const char* Bridge::ActName() { ResolveNames(); return g_actName; }
+
+void Bridge::OnScenarioLoad()
+{
+    ResetMatch();
+    g_wasInMatch = false;
+}
 
 void Bridge::Shutdown()
 {
