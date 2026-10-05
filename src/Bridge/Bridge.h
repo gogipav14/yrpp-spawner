@@ -76,7 +76,7 @@ struct BridgeEntity
     uint8_t  category_rtti; // WhatAmI(): Unit=1, Aircraft=2, Building=6, Infantry=15
     uint8_t  hp_frac;       // GetHealthPercentage()*255
     uint8_t  state;         // coarse state (0 for now)
-    uint8_t  group_id;      // group assignment (0 = none; reserved)
+    uint8_t  group_id;      // OWNER_KIND (was reserved group id): 0 own, 1 enemy player, 2 neutral/civilian/non-player
 };
 
 struct BridgeFactory             // one own FactoryClass (from FactoryClass::Array, Owner==agent)
@@ -102,7 +102,7 @@ struct BridgeOBS
     BridgeFactory factories[BridgeContract::N_FACTORY];
     // Spatial vision grid (CHW): grid[channel][gy][gx], each a uint8. Fog-honored (no maphack).
     // Channels: 0 passability, 1 ore, 2 fog(0 shroud/1 fog/2 visible), 3 own_units,
-    //           4 enemy_units(visible only), 5 own_buildings, 6 height
+    //           4 enemy_units(visible enemy-player units only; neutral excluded), 5 own_buildings, 6 height
     uint8_t       grid[BridgeContract::GRID_CHANNELS][BridgeContract::GRID_DIM][BridgeContract::GRID_DIM];
     uint16_t      grid_map_w;   // live MapCoordBounds width  in cells (so Python knows the mapped area)
     uint16_t      grid_map_h;   // live MapCoordBounds height in cells

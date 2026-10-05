@@ -250,7 +250,28 @@ namespace
 
     // pType is guaranteed non-null by the caller (technos with no type are skipped),
     // so GetHealthPercentage()'s internal GetType() cannot fault here.
-    void FillEntity(BridgeEntity& e, TechnoClass* pT, TechnoTypeClass* pType)
+    // Owner classification (BridgeEntity.group_id = owner_kind), same notion of "opposing house" as the
+    // M1 win fallback in ComputeStatus: HouseClass::IsNeutral() (HouseClass.h:746, Type->MultiplayPassive),
+    // IsInitiallyObserver() (HouseClass.h:760), and a null Type (not a registered player house).
+    // 0 own, 1 enemy player (non-allied real player, human or AI), 2 neutral/non-player.
+    uint8_t OwnerKind(HouseClass* pAgent, HouseClass* owner)
+    {
+        if (owner == pAgent)
+            return 0;
+        if (!owner->Type || owner->IsNeutral() || owner->IsInitiallyObserver())
+            return 2;
+        return 1;
+    }
+
+    // Playable-area test: same MapCoordBounds the spatial grid uses (a cell outside it is not part of
+    // the visible map, e.g. GASPYSAT parked at cell (5000,31)).
+    bool CellOnMap(const CellStruct& c)
+    {
+        const LTRBStruct& mb = MapClass::Instance.MapCoordBounds;
+        return c.X >= mb.Left && c.X <= mb.Right && c.Y >= mb.Top && c.Y <= mb.Bottom;
+    }
+
+    void FillEntity(BridgeEntity& e, TechnoClass* pT, TechnoTypeClass* pType, uint8_t ownerKind)
     {
         e.unique_id     = static_cast<int32_t>(pT->UniqueID);   // stable handle for ACT targeting
         e.type_id       = pType->GetArrayIndex();               // per-RTTI-category index
@@ -266,7 +287,7 @@ namespace
         e.hp_frac = static_cast<uint8_t>(hp * 255.0);
 
         e.state    = 0;
-        e.group_id = 0;
+        e.group_id = ownerKind;                                 // owner_kind (see OwnerKind)
     }
 }
 
@@ -402,11 +423,15 @@ void Bridge::OnFrame()
         if (!pType)                                   // transient/no-type object: skip
             continue;
 
+        // Off-map / no-cell objects (pseudo-objects like GASPYSAT) are never emitted.
+        if (!CellOnMap(pT->GetMapCoords()))
+            continue;
+
         HouseClass* owner = pT->Owner;
         if (owner == pAgent)
         {
             if (nOwn < BridgeContract::N_OWN)
-                FillEntity(o->own[nOwn++], pT, pType);
+                FillEntity(o->own[nOwn++], pT, pType, 0);
             if (pType->Naval)
                 ++navy;
         }
@@ -418,7 +443,7 @@ void Bridge::OnFrame()
             if (cell && !cell->IsShrouded() && !cell->IsFogged())
             {
                 if (nEnemy < BridgeContract::N_ENEMY)
-                    FillEntity(o->enemy[nEnemy++], pT, pType);
+                    FillEntity(o->enemy[nEnemy++], pT, pType, OwnerKind(pAgent, owner));
             }
         }
     }
@@ -507,12 +532,12 @@ void Bridge::OnFrame()
                 if (UnitClass* u = c->GetUnit(false))
                 {
                     if (u->Owner == pAgent) o->grid[3][gy][gx] = 255;          // own units
-                    else if (visibleNow && u->Owner && !pAgent->IsAlliedWith(u->Owner)) o->grid[4][gy][gx] = 255;
+                    else if (visibleNow && u->Owner && !pAgent->IsAlliedWith(u->Owner) && OwnerKind(pAgent, u->Owner) == 1) o->grid[4][gy][gx] = 255;
                 }
                 if (InfantryClass* inf = c->GetInfantry(false))
                 {
                     if (inf->Owner == pAgent) o->grid[3][gy][gx] = 255;
-                    else if (visibleNow && inf->Owner && !pAgent->IsAlliedWith(inf->Owner)) o->grid[4][gy][gx] = 255;
+                    else if (visibleNow && inf->Owner && !pAgent->IsAlliedWith(inf->Owner) && OwnerKind(pAgent, inf->Owner) == 1) o->grid[4][gy][gx] = 255;
                 }
             }
         }
