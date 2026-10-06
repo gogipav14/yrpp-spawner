@@ -9,6 +9,7 @@
 */
 #include <cstdio>
 #include <cstring>
+#include <climits>
 #include <windows.h>
 
 #include "Bridge.h"
@@ -655,6 +656,7 @@ namespace
     int g_cacheType = -1;
     int g_cacheBldCount = -1;
     int g_lastComputeFrame = -1000000;
+    int g_scoreStartBal = INT_MIN;
 
     int __cdecl CmpCand(const void* a, const void* b)
     {
@@ -788,6 +790,7 @@ void Bridge::ResetPlacement()
     g_cacheType = -1;
     g_cacheBldCount = -1;
     g_lastComputeFrame = -1000000;
+    g_scoreStartBal = INT_MIN;
 }
 
 void Bridge::UpdatePlacement(HouseClass* pAgent, int frame, bool decision, bool lockstep,
@@ -838,25 +841,37 @@ void Bridge::ReadScore(HouseClass* pAgent, BridgeScore& s)
 {
     memset(&s, 0, sizeof(s));
     if (!pAgent) return;
-    s.killed_units_total     = Pos(pAgent->TotalKilledUnits);
-    s.killed_buildings_total = Pos(pAgent->TotalKilledBuildings);
-    s.killed_infantry        = SumTracker(pAgent->KilledInfantryTypes);
-    s.killed_vehicles        = SumTracker(pAgent->KilledUnitTypes);
-    s.killed_aircraft        = SumTracker(pAgent->KilledAircraftTypes);
-    s.killed_buildings_trk   = SumTracker(pAgent->KilledBuildingTypes);
-    s.credits_harvested      = Pos(pAgent->HarvestedCredits);
-    s.credits_spent          = Pos(pAgent->CreditsSpent);
-    s.stolen_credits         = Pos(pAgent->StolenBuildingsCredits);
+    // Live evidence (3 games): TotalKilledUnits == sum_h h.KilledUnitsOfHouses[agent] exactly, so
+    // TotalKilledUnits is NOT "kills by us"; it equals the column sum. Direction of the 20-slot arrays
+    // (HouseClass.h:978-981, "for endgame score screen") is therefore taken as: X.Killed*OfHouses[v]
+    // = things of house v that X destroyed. Then row(agent, enemies) = kills by us, column = our losses.
+    // TotalKilled* is dropped (redundant). If live data disagrees the row/column slots just swap meaning.
+    s.raw_trk_infantry  = SumTracker(pAgent->KilledInfantryTypes);
+    s.raw_trk_vehicles  = SumTracker(pAgent->KilledUnitTypes);
+    s.raw_trk_aircraft  = SumTracker(pAgent->KilledAircraftTypes);
+    s.raw_trk_buildings = SumTracker(pAgent->KilledBuildingTypes);
+    s.credits_harvested_raw = Pos(pAgent->HarvestedCredits);
+    s.credits_spent         = Pos(pAgent->CreditsSpent);
+    s.stolen_credits        = Pos(pAgent->StolenBuildingsCredits);
+    if (g_scoreStartBal == INT_MIN) g_scoreStartBal = pAgent->Balance;
+    long long inc = static_cast<long long>(pAgent->Balance) - g_scoreStartBal + pAgent->CreditsSpent;
+    s.income_derived = inc > 0 ? static_cast<uint32_t>(inc > 0x7FFFFFFF ? 0x7FFFFFFF : inc) : 0u;
+
     const int me = pAgent->ArrayIndex;
-    if (me >= 0 && me < 20)
+    DynamicVectorClass<HouseClass*>& ha = HouseClass::Array;
+    for (int i = 0; i < ha.Count && i < 20; ++i)
     {
-        DynamicVectorClass<HouseClass*>& ha = HouseClass::Array;
-        for (int i = 0; i < ha.Count; ++i)
+        HouseClass* h = ha.Items[i];
+        if (!h || h == pAgent) continue;
+        if (me >= 0 && me < 20)
         {
-            HouseClass* h = ha.Items[i];
-            if (!h || h == pAgent) continue;
             s.lost_units     += Pos(h->KilledUnitsOfHouses[me]);
             s.lost_buildings += Pos(h->KilledBuildingsOfHouses[me]);
+        }
+        if (h->ArrayIndex >= 0 && h->ArrayIndex < 20 && !pAgent->IsAlliedWith(h))
+        {
+            s.kills_units_by_us     += Pos(pAgent->KilledUnitsOfHouses[h->ArrayIndex]);
+            s.kills_buildings_by_us += Pos(pAgent->KilledBuildingsOfHouses[h->ArrayIndex]);
         }
     }
 }

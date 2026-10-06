@@ -98,20 +98,20 @@ struct BridgePlaceCell            // one legal top-left cell for the building th
     uint8_t ore;                 // sum of tiberium value within 6 cells (clamped 255)
 };
 
-struct BridgeScore               // all cumulative since match start (HouseClass score-screen fields)
+struct BridgeScore               // cumulative since match start; slots 2-5 are UNVERIFIED raw (see ReadScore)
 {
-    uint32_t killed_units_total;      // HouseClass::TotalKilledUnits (enemy non-building objects destroyed by us)
-    uint32_t killed_buildings_total;  // HouseClass::TotalKilledBuildings
-    uint32_t killed_infantry;         // sum KilledInfantryTypes.UnitTotals[]
-    uint32_t killed_vehicles;         // sum KilledUnitTypes.UnitTotals[]
-    uint32_t killed_aircraft;         // sum KilledAircraftTypes.UnitTotals[]
-    uint32_t killed_buildings_trk;    // sum KilledBuildingTypes.UnitTotals[]
+    uint32_t kills_units_by_us;       // sum over enemy houses e of agent.KilledUnitsOfHouses[e]  (v7 fix; was killed_units_total)
+    uint32_t kills_buildings_by_us;   // sum over enemy houses e of agent.KilledBuildingsOfHouses[e] (was killed_buildings_total)
+    uint32_t raw_trk_infantry;        // sum KilledInfantryTypes.UnitTotals[] -- semantics unverified (kills vs losses)
+    uint32_t raw_trk_vehicles;        // sum KilledUnitTypes.UnitTotals[]     -- unverified
+    uint32_t raw_trk_aircraft;        // sum KilledAircraftTypes.UnitTotals[] -- unverified
+    uint32_t raw_trk_buildings;       // sum KilledBuildingTypes.UnitTotals[] -- unverified
     uint32_t lost_units;              // sum over other houses h of h.KilledUnitsOfHouses[agent]
     uint32_t lost_buildings;          // sum over other houses h of h.KilledBuildingsOfHouses[agent]
-    uint32_t credits_harvested;       // HouseClass::HarvestedCredits
+    uint32_t credits_harvested_raw;   // HouseClass::HarvestedCredits (may be unused in skirmish -> 0)
     uint32_t credits_spent;           // HouseClass::CreditsSpent
+    uint32_t income_derived;          // max(0, Balance_now - Balance_first_frame + CreditsSpent): harvest+sell+refund proxy
     uint32_t stolen_credits;          // HouseClass::StolenBuildingsCredits
-    uint32_t _reserved;               // 0
 };
 
 struct BridgeOBS
