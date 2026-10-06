@@ -27,6 +27,10 @@
 #include <TeamTypeClass.h>
 #include <TaskForceClass.h>
 #include <ScriptTypeClass.h>
+#include <FactoryClass.h>
+#include <BuildingClass.h>
+#include <MapClass.h>
+#include <CellClass.h>
 
 namespace
 {
@@ -633,4 +637,184 @@ void Bridge::DumpRulesOnce(HouseClass* pAgent)
     int okScr = DumpScripts(c);
     Debug::Log("[BRIDGE] rule dump: types=%d rules_ai=%d scripts=%d aitriggers=%d teamtypes=%d taskforces=%d scripttypes=%d waypoints=%d\n",
         nTypes, okAI, okScr, c[0], c[1], c[2], c[3], c[4]);
+}
+
+// ============================================================================================
+//  v6 placement hints. Legality = BuildingTypeClass::CanPlaceHere(CellStruct*, HouseClass*)
+//  (YRpp/BuildingTypeClass.h:71, JMP_THIS 0x464AC0) -- the SAME check DoPlace uses to reject
+//  PLACE_INVALID_CELL, so a cell listed here is exactly a cell PLACE will accept. Pure query.
+// ============================================================================================
+namespace
+{
+    struct Cand { short x, y; unsigned char dist, ore; };
+
+    Cand g_cands[6000];
+    unsigned char g_visited[512 * 512];
+    BridgePlaceCell g_cache[BridgeContract::N_PLACE];
+    int g_cacheN = 0;
+    int g_cacheType = -1;
+    int g_cacheBldCount = -1;
+    int g_lastComputeFrame = -1000000;
+
+    int __cdecl CmpCand(const void* a, const void* b)
+    {
+        const Cand* x = static_cast<const Cand*>(a);
+        const Cand* y = static_cast<const Cand*>(b);
+        return static_cast<int>(x->dist) - static_cast<int>(y->dist);
+    }
+
+    int OreAround(int cx, int cy)
+    {
+        int sum = 0;
+        for (int dy = -6; dy <= 6; ++dy)
+            for (int dx = -6; dx <= 6; ++dx)
+            {
+                CellStruct cs;
+                cs.X = static_cast<short>(cx + dx);
+                cs.Y = static_cast<short>(cy + dy);
+                CellClass* c = MapClass::Instance.TryGetCellAt(cs);
+                if (c)
+                {
+                    int v = c->GetContainedTiberiumValue();
+                    if (v > 0) sum += v;
+                    if (sum >= 255) return 255;
+                }
+            }
+        return sum;
+    }
+
+    // The agent's first factory holding a completed BUILDING (same condition as read_factories).
+    BuildingTypeClass* ReadyBuildingType(HouseClass* pAgent)
+    {
+        DynamicVectorClass<FactoryClass*>& facs = FactoryClass::Array;
+        for (int i = 0; i < facs.Count; ++i)
+        {
+            FactoryClass* f = facs.Items[i];
+            if (!f || f->Owner != pAgent) continue;
+            TechnoClass* obj = f->Object;
+            if (!obj || obj->WhatAmI() != AbstractType::Building) continue;
+            if (!f->IsDone()) continue;
+            TechnoTypeClass* tt = obj->GetTechnoType();
+            if (tt) return static_cast<BuildingTypeClass*>(tt);
+        }
+        return nullptr;
+    }
+
+    int ComputeCells(HouseClass* pAgent, BuildingTypeClass* bt, BridgePlaceCell* out)
+    {
+        const LTRBStruct& mb = MapClass::Instance.MapCoordBounds;
+        DynamicVectorClass<BuildingClass*>& bl = pAgent->Buildings;
+        const int nb = bl.Count;
+        if (nb <= 0 || nb > 4096) return 0;
+
+        static short cyx[64], cyy[64];
+        int ncy = 0;
+        for (int i = 0; i < nb; ++i)
+        {
+            BuildingClass* b = bl.Items[i];
+            if (!b || b->InLimbo || !b->Type) continue;
+            if (b->Type->ConstructionYard && ncy < 64)
+            {
+                CellStruct m = b->GetMapCoords();
+                cyx[ncy] = m.X; cyy[ncy] = m.Y; ++ncy;
+            }
+        }
+        memset(g_visited, 0, sizeof(g_visited));
+        int nc = 0, tests = 0;
+        const int maxCand = static_cast<int>(sizeof(g_cands) / sizeof(g_cands[0]));
+        const int maxTests = 12000;
+
+        for (int pass = 0; pass < 2 && tests < maxTests; ++pass)
+            for (int i = 0; i < nb && tests < maxTests; ++i)
+            {
+                BuildingClass* b = bl.Items[i];
+                if (!b || b->InLimbo || !b->Type) continue;
+                if ((pass == 0) != (b->Type->ConstructionYard != 0)) continue;
+                CellStruct m = b->GetMapCoords();
+                for (int y = m.Y - 20; y <= m.Y + 20 && tests < maxTests; ++y)
+                    for (int x = m.X - 20; x <= m.X + 20; ++x)
+                    {
+                        if (x < 0 || y < 0 || x >= 512 || y >= 512) continue;
+                        if (x < mb.Left || x > mb.Right || y < mb.Top || y > mb.Bottom) continue;
+                        unsigned char& v = g_visited[y * 512 + x];
+                        if (v) continue;
+                        v = 1;
+                        CellStruct cs;
+                        cs.X = static_cast<short>(x);
+                        cs.Y = static_cast<short>(y);
+                        if (!MapClass::Instance.TryGetCellAt(cs)) continue;
+                        if (++tests > maxTests) break;
+                        if (!bt->CanPlaceHere(&cs, pAgent)) continue;
+                        if (nc >= maxCand) continue;
+                        int best = 255;
+                        for (int k = 0; k < ncy; ++k)
+                        {
+                            int dx = x - cyx[k], dy = y - cyy[k];
+                            if (dx < 0) dx = -dx;
+                            if (dy < 0) dy = -dy;
+                            int d = dx > dy ? dx : dy;
+                            if (d < best) best = d;
+                        }
+                        if (ncy == 0)   // no conyard: distance to the anchor building
+                        {
+                            int dx = x - m.X, dy = y - m.Y;
+                            if (dx < 0) dx = -dx;
+                            if (dy < 0) dy = -dy;
+                            best = dx > dy ? dx : dy;
+                        }
+                        g_cands[nc].x = cs.X; g_cands[nc].y = cs.Y;
+                        g_cands[nc].dist = static_cast<unsigned char>(best > 255 ? 255 : best);
+                        g_cands[nc].ore = 0;
+                        ++nc;
+                    }
+            }
+
+        qsort(g_cands, nc, sizeof(Cand), CmpCand);
+        int n = nc < BridgeContract::N_PLACE ? nc : BridgeContract::N_PLACE;
+        for (int i = 0; i < n; ++i)
+        {
+            out[i].x = g_cands[i].x;
+            out[i].y = g_cands[i].y;
+            out[i].dist = g_cands[i].dist;
+            out[i].ore = static_cast<uint8_t>(OreAround(g_cands[i].x, g_cands[i].y));
+        }
+        return n;
+    }
+}
+
+void Bridge::ResetPlacement()
+{
+    g_cacheN = 0;
+    g_cacheType = -1;
+    g_cacheBldCount = -1;
+    g_lastComputeFrame = -1000000;
+}
+
+void Bridge::UpdatePlacement(HouseClass* pAgent, int frame, bool decision, bool lockstep,
+                             int32_t& outType, uint8_t& outRtti, uint16_t& outN, BridgePlaceCell* outCells)
+{
+    outType = -1; outRtti = 0; outN = 0;
+    if (!pAgent) return;
+    BuildingTypeClass* bt = ReadyBuildingType(pAgent);
+    if (!bt)
+    {
+        g_cacheType = -1;
+        g_cacheN = 0;
+        return;
+    }
+    const int typeIdx = bt->ArrayIndex;
+    const int bc = pAgent->Buildings.Count;
+    const bool changed = (typeIdx != g_cacheType) || (bc != g_cacheBldCount);
+    const bool due = lockstep ? decision : (frame - g_lastComputeFrame >= 15);
+    if (changed || due)
+    {
+        g_cacheN = ComputeCells(pAgent, bt, g_cache);
+        g_cacheType = typeIdx;
+        g_cacheBldCount = bc;
+        g_lastComputeFrame = frame;
+    }
+    outType = typeIdx;
+    outRtti = static_cast<uint8_t>(AbstractType::BuildingType);
+    outN = static_cast<uint16_t>(g_cacheN);
+    for (int i = 0; i < g_cacheN; ++i) outCells[i] = g_cache[i];
 }

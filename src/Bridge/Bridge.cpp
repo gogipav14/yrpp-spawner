@@ -138,6 +138,7 @@ namespace
     void ResetMatch()
     {
         Bridge::ResetRuleDump();
+        Bridge::ResetPlacement();
         g_agentIdx = -1;
         g_agentPtr = nullptr;
         g_termBits = 0;
@@ -395,6 +396,12 @@ void Bridge::OnFrame()
         WaitForSingleObject(g_hGoEv, 0);
     }
 
+    // v6 placement hints: computed BEFORE the seqlock window (read-only engine queries), copied inside it.
+    int32_t plType; uint8_t plRtti; uint16_t plN;
+    BridgePlaceCell plCells[BridgeContract::N_PLACE];
+    Bridge::UpdatePlacement(pAgent, static_cast<int>(Unsorted::CurrentFrame), decision, g_stepK > 0,
+                            plType, plRtti, plN, plCells);
+
     // --- seqlock: pub_seq odd while we write, even when the whole struct is consistent ---
     PubBegin();
     o->header.magic       = BridgeContract::MAGIC;
@@ -546,6 +553,12 @@ void Bridge::OnFrame()
     }
 
     o->header.frame_seq = static_cast<uint64_t>(curFrame);
+    o->placement_type_id = plType;
+    o->placement_rtti    = plRtti;
+    o->_pad2             = 0;
+    o->n_place           = plN;
+    memset(o->place_cells, 0, sizeof(o->place_cells));
+    for (int i = 0; i < plN; ++i) o->place_cells[i] = plCells[i];
     o->step_k           = static_cast<uint32_t>(g_stepK);
     o->step_timeouts    = g_stepTimeouts;
     o->step_decisions   = g_stepDecisions;

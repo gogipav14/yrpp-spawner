@@ -16,10 +16,11 @@ class HouseClass;
 namespace BridgeContract
 {
     constexpr uint32_t MAGIC     = 0x59524252u; // 'YRBR'
-    constexpr uint32_t VERSION   = 5u;          // v5: + step_k/step_timeouts/step_decisions before pub_seq (v4: pub_seq seqlock, v3: spatial grid)
+    constexpr uint32_t VERSION   = 6u;          // v6: + placement hints (type/rtti/n/cells[64]) before step_*; v5: + step_k/step_timeouts/step_decisions before pub_seq (v4: pub_seq seqlock, v3: spatial grid)
     constexpr int      N_OWN     = 256;
     constexpr int      N_ENEMY   = 256;
     constexpr int      N_FACTORY = 16;          // max own factories surfaced
+    constexpr int      N_PLACE   = 64;          // legal placement cells surfaced
     constexpr int      GRID_DIM      = 64;      // downsampled spatial grid, H = W = 64
     constexpr int      GRID_CHANNELS = 7;       // passability,ore,fog,own_units,enemy_units,own_buildings,height
     constexpr char     OBS_NAME[] = "Local\\yr_bridge_obs";
@@ -90,6 +91,13 @@ struct BridgeFactory             // one own FactoryClass (from FactoryClass::Arr
     uint8_t flags;               // bit0 OnHold, bit1 IsSuspended
 };
 
+struct BridgePlaceCell            // one legal top-left cell for the building that is ready to place
+{
+    int16_t x, y;                // cell coords (same convention as PLACE cell_x/cell_y)
+    uint8_t dist;                // distance to nearest own ConYard (cells, clamped 255)
+    uint8_t ore;                 // sum of tiberium value within 6 cells (clamped 255)
+};
+
 struct BridgeOBS
 {
     BridgeHeader  header;
@@ -107,6 +115,13 @@ struct BridgeOBS
     uint8_t       grid[BridgeContract::GRID_CHANNELS][BridgeContract::GRID_DIM][BridgeContract::GRID_DIM];
     uint16_t      grid_map_w;   // live MapCoordBounds width  in cells (so Python knows the mapped area)
     uint16_t      grid_map_h;   // live MapCoordBounds height in cells
+    // v6 placement hints: the agent's completed building awaiting placement, and up to 64 cells where
+    // BuildingTypeClass::CanPlaceHere(cell, agent) is true, sorted by dist ascending.
+    int32_t       placement_type_id;  // BuildingType array index, -1 when nothing is ready
+    uint8_t       placement_rtti;     // AbstractType::BuildingType when ready, else 0
+    uint8_t       _pad2;
+    uint16_t      n_place;            // valid entries in place_cells
+    BridgePlaceCell place_cells[BridgeContract::N_PLACE];
     // v5 lockstep info (always written; step_k==0 means free-run, the other two stay 0).
     uint32_t      step_k;          // YR_BRIDGE_STEP (1..600) if the lockstep events exist, else 0
     uint32_t      step_timeouts;   // cumulative go-wait timeouts since process start
@@ -146,7 +161,8 @@ static_assert(sizeof(BridgeHeader)  == 24, "BridgeHeader layout changed");
 static_assert(sizeof(BridgeGlobals) == 36, "BridgeGlobals layout changed");
 static_assert(sizeof(BridgeEntity)  == 16, "BridgeEntity layout changed");
 static_assert(sizeof(BridgeFactory) == 12, "BridgeFactory layout changed");
-static_assert(sizeof(BridgeOBS) == 24 + 36 + 8 + 256 * 16 + 256 * 16 + 16 * 12 + 7 * 64 * 64 + 4 + 12 + 8, "BridgeOBS layout changed");
+static_assert(sizeof(BridgePlaceCell) == 6, "BridgePlaceCell layout changed");
+static_assert(sizeof(BridgeOBS) == 24 + 36 + 8 + 256 * 16 + 256 * 16 + 16 * 12 + 7 * 64 * 64 + 4 + (8 + 64 * 6) + 12 + 8, "BridgeOBS layout changed");
 static_assert(sizeof(BridgeAction)  == 24, "BridgeAction layout changed");
 static_assert(sizeof(BridgeACT) == 24 + 8 + 8 + 4 + 24, "BridgeACT layout changed");
 
@@ -163,6 +179,11 @@ namespace Bridge
     // One-shot: dump the buildable type tables to type_catalog.csv (name <-> rtti/index).
     void DumpCatalogOnce();
     // One-shot per match: rules_types.json / rules_ai.json / ai_scripts.json (read-only engine dump).
+    // Compute (cached, bounded) legal placement cells for the agent's ready building. Read-only.
+    // Call BEFORE PubBegin, then copy into the OBS.
+    void UpdatePlacement(HouseClass* pAgent, int frame, bool decision, bool lockstep,
+                         int32_t& outType, uint8_t& outRtti, uint16_t& outN, BridgePlaceCell* outCells);
+    void ResetPlacement();
     void DumpRulesOnce(HouseClass* pAgent);
     void ResetRuleDump();   // re-arm on match reset
     // Release the shared-memory mappings (optional; OS reclaims on process exit).
