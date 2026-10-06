@@ -818,3 +818,45 @@ void Bridge::UpdatePlacement(HouseClass* pAgent, int frame, bool decision, bool 
     outN = static_cast<uint16_t>(g_cacheN);
     for (int i = 0; i < g_cacheN; ++i) outCells[i] = g_cache[i];
 }
+
+// ---- v7 score counters (read-only). Fields: YRpp/HouseClass.h:918-919 (CreditsSpent/HarvestedCredits),
+// :921 (StolenBuildingsCredits), :935-938 (Killed*Types UnitTrackerClass, UnitTotals[0x200] at :42),
+// :976-981 ("for endgame score screen": Total/KilledUnitsOfHouses/BuildingsOfHouses[20]).
+namespace
+{
+    uint32_t SumTracker(UnitTrackerClass& t)
+    {
+        long long s = 0;
+        for (int i = 0; i < 0x200; ++i)
+            if (t.UnitTotals[i] > 0) s += t.UnitTotals[i];
+        return s > 0x7FFFFFFF ? 0x7FFFFFFFu : static_cast<uint32_t>(s);
+    }
+    uint32_t Pos(int v) { return v > 0 ? static_cast<uint32_t>(v) : 0u; }
+}
+
+void Bridge::ReadScore(HouseClass* pAgent, BridgeScore& s)
+{
+    memset(&s, 0, sizeof(s));
+    if (!pAgent) return;
+    s.killed_units_total     = Pos(pAgent->TotalKilledUnits);
+    s.killed_buildings_total = Pos(pAgent->TotalKilledBuildings);
+    s.killed_infantry        = SumTracker(pAgent->KilledInfantryTypes);
+    s.killed_vehicles        = SumTracker(pAgent->KilledUnitTypes);
+    s.killed_aircraft        = SumTracker(pAgent->KilledAircraftTypes);
+    s.killed_buildings_trk   = SumTracker(pAgent->KilledBuildingTypes);
+    s.credits_harvested      = Pos(pAgent->HarvestedCredits);
+    s.credits_spent          = Pos(pAgent->CreditsSpent);
+    s.stolen_credits         = Pos(pAgent->StolenBuildingsCredits);
+    const int me = pAgent->ArrayIndex;
+    if (me >= 0 && me < 20)
+    {
+        DynamicVectorClass<HouseClass*>& ha = HouseClass::Array;
+        for (int i = 0; i < ha.Count; ++i)
+        {
+            HouseClass* h = ha.Items[i];
+            if (!h || h == pAgent) continue;
+            s.lost_units     += Pos(h->KilledUnitsOfHouses[me]);
+            s.lost_buildings += Pos(h->KilledBuildingsOfHouses[me]);
+        }
+    }
+}

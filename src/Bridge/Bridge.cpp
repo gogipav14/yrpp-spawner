@@ -553,6 +553,7 @@ void Bridge::OnFrame()
     }
 
     o->header.frame_seq = static_cast<uint64_t>(curFrame);
+    Bridge::ReadScore(pAgent, o->score);
     o->placement_type_id = plType;
     o->placement_rtti    = plRtti;
     o->_pad2             = 0;

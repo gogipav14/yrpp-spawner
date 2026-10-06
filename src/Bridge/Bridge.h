@@ -16,7 +16,7 @@ class HouseClass;
 namespace BridgeContract
 {
     constexpr uint32_t MAGIC     = 0x59524252u; // 'YRBR'
-    constexpr uint32_t VERSION   = 6u;          // v6: + placement hints (type/rtti/n/cells[64]) before step_*; v5: + step_k/step_timeouts/step_decisions before pub_seq (v4: pub_seq seqlock, v3: spatial grid)
+    constexpr uint32_t VERSION   = 7u;          // v7: + BridgeScore (12 x u32 score-screen counters) before step_k; v6: + placement hints (type/rtti/n/cells[64]) before step_*; v5: + step_k/step_timeouts/step_decisions before pub_seq (v4: pub_seq seqlock, v3: spatial grid)
     constexpr int      N_OWN     = 256;
     constexpr int      N_ENEMY   = 256;
     constexpr int      N_FACTORY = 16;          // max own factories surfaced
@@ -98,6 +98,22 @@ struct BridgePlaceCell            // one legal top-left cell for the building th
     uint8_t ore;                 // sum of tiberium value within 6 cells (clamped 255)
 };
 
+struct BridgeScore               // all cumulative since match start (HouseClass score-screen fields)
+{
+    uint32_t killed_units_total;      // HouseClass::TotalKilledUnits (enemy non-building objects destroyed by us)
+    uint32_t killed_buildings_total;  // HouseClass::TotalKilledBuildings
+    uint32_t killed_infantry;         // sum KilledInfantryTypes.UnitTotals[]
+    uint32_t killed_vehicles;         // sum KilledUnitTypes.UnitTotals[]
+    uint32_t killed_aircraft;         // sum KilledAircraftTypes.UnitTotals[]
+    uint32_t killed_buildings_trk;    // sum KilledBuildingTypes.UnitTotals[]
+    uint32_t lost_units;              // sum over other houses h of h.KilledUnitsOfHouses[agent]
+    uint32_t lost_buildings;          // sum over other houses h of h.KilledBuildingsOfHouses[agent]
+    uint32_t credits_harvested;       // HouseClass::HarvestedCredits
+    uint32_t credits_spent;           // HouseClass::CreditsSpent
+    uint32_t stolen_credits;          // HouseClass::StolenBuildingsCredits
+    uint32_t _reserved;               // 0
+};
+
 struct BridgeOBS
 {
     BridgeHeader  header;
@@ -122,6 +138,8 @@ struct BridgeOBS
     uint8_t       _pad2;
     uint16_t      n_place;            // valid entries in place_cells
     BridgePlaceCell place_cells[BridgeContract::N_PLACE];
+    // v7 score-screen counters for the agent house (same data the end-game score screen shows).
+    BridgeScore   score;
     // v5 lockstep info (always written; step_k==0 means free-run, the other two stay 0).
     uint32_t      step_k;          // YR_BRIDGE_STEP (1..600) if the lockstep events exist, else 0
     uint32_t      step_timeouts;   // cumulative go-wait timeouts since process start
@@ -162,7 +180,8 @@ static_assert(sizeof(BridgeGlobals) == 36, "BridgeGlobals layout changed");
 static_assert(sizeof(BridgeEntity)  == 16, "BridgeEntity layout changed");
 static_assert(sizeof(BridgeFactory) == 12, "BridgeFactory layout changed");
 static_assert(sizeof(BridgePlaceCell) == 6, "BridgePlaceCell layout changed");
-static_assert(sizeof(BridgeOBS) == 24 + 36 + 8 + 256 * 16 + 256 * 16 + 16 * 12 + 7 * 64 * 64 + 4 + (8 + 64 * 6) + 12 + 8, "BridgeOBS layout changed");
+static_assert(sizeof(BridgeScore) == 48, "BridgeScore layout changed");
+static_assert(sizeof(BridgeOBS) == 24 + 36 + 8 + 256 * 16 + 256 * 16 + 16 * 12 + 7 * 64 * 64 + 4 + (8 + 64 * 6) + 48 + 12 + 8, "BridgeOBS layout changed");
 static_assert(sizeof(BridgeAction)  == 24, "BridgeAction layout changed");
 static_assert(sizeof(BridgeACT) == 24 + 8 + 8 + 4 + 24, "BridgeACT layout changed");
 
@@ -184,6 +203,7 @@ namespace Bridge
     void UpdatePlacement(HouseClass* pAgent, int frame, bool decision, bool lockstep,
                          int32_t& outType, uint8_t& outRtti, uint16_t& outN, BridgePlaceCell* outCells);
     void ResetPlacement();
+    void ReadScore(HouseClass* pAgent, BridgeScore& s);   // v7 score-screen counters (read-only)
     void DumpRulesOnce(HouseClass* pAgent);
     void ResetRuleDump();   // re-arm on match reset
     // Release the shared-memory mappings (optional; OS reclaims on process exit).
