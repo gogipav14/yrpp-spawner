@@ -122,18 +122,19 @@ namespace
         return pU;
     }
 
-    // Phobos Ammo.DeployUnlockMinimum/MaximumAmount (TechnoType ext = TechnoTypeClass+0x18; ext+0xE4 / +0xE8, default -1;
+    // Phobos Ammo.DeployUnlockMinimum/MaximumAmount (TechnoTypeExt pointer = TechnoTypeClass+0xDF4 (NOT +0x18, which is the
+    // BuildingTypeExt slot); ext+0xE4 / +0xE8, default -1, negative disables that bound, comparisons inclusive; the installed helper
+    // 0x10059280 applies the bounds regardless of ammo capacity;
     // offsets confirmed from the installed Phobos 0.4.0.2 INI parser). Fail closed for ammo types when the extension
     // layout cannot be trusted (signature mismatch / unreadable ext).
     bool DeployAmmoOK(TechnoClass* pT)
     {
         TechnoTypeClass* tt = pT->GetTechnoType();
         if (!tt) return false;
-        if (tt->Ammo <= 0) return true;                         // no ammo: no ammo restriction possible
         const int st = Bridge::PhobosState();
         if (st == 1) return true;                               // Phobos absent
         if (st != 2) return false;                              // present but unverified: fail closed
-        const char* ext = *reinterpret_cast<const char* const*>(reinterpret_cast<const char*>(tt) + 0x18);
+        const char* ext = *reinterpret_cast<const char* const*>(reinterpret_cast<const char*>(tt) + 0xDF4);
         if (!ext || !Readable(ext + 0xE4, 8)) return false;
         const int mn = *reinterpret_cast<const int*>(ext + 0xE4), mx = *reinterpret_cast<const int*>(ext + 0xE8);
         if (mn >= 0 && pT->Ammo < mn) return false;
