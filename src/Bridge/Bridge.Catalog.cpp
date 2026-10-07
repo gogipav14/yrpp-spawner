@@ -1215,9 +1215,46 @@ bool Bridge::FoundationUnshrouded(BuildingTypeClass* bt, int x, int y)
 
 // Native anchor predicate (0x4A8EB0): an own BaseNormal building, or -- with GameModeOptions.BuildOffAlly -- a
 // building whose owner IsAlliedWith(us) (true for self too) and whose type has EligibileForAllyBuilding.
-static bool IsPlaceAnchor(BuildingClass* b, HouseClass* pAgent)
+// Installed Phobos hook DisplayClass_BuildingProximityCheck_BuildArea (0x4A8FD7), layout read from the installed
+// Phobos.dll disassembly: BuildingTypeClass+0x18 = Phobos ext pointer; ext+0x142 = NoBuildAreaOnBuildup (byte);
+// ext+0x144/+0x148 = Adjacent.Allowed vector<BuildingTypeClass*> (begin,end); ext+0x150/+0x154 = Adjacent.Disallowed.
+// Per candidate anchor A (type TA), A is skipped when: TA.NoBuildAreaOnBuildup && A.Mission == Construction(0x12);
+// or the PROPOSED type's Allowed list is non-empty and lacks TA; or its Disallowed list contains TA. All reads are
+// guarded by Readable() and fall back to "no restriction" if the ext block is unreadable.
+static bool PhobosAnchorExcluded(BuildingClass* a, BuildingTypeClass* proposed)
+{
+    const char* ta = reinterpret_cast<const char*>(a->Type);
+    const char* pt = reinterpret_cast<const char*>(proposed);
+    if (!Readable(ta + 0x18, 4) || !Readable(pt + 0x18, 4)) return false;
+    const char* ea = *reinterpret_cast<const char* const*>(ta + 0x18);
+    const char* ep = *reinterpret_cast<const char* const*>(pt + 0x18);
+    if (ea && Readable(ea + 0x142, 1) && *reinterpret_cast<const unsigned char*>(ea + 0x142) &&
+        static_cast<int>(a->CurrentMission) == 0x12)
+        return true;
+    if (!ep || !Readable(ep + 0x144, 0x14)) return false;
+    auto inList = [&](int off, bool& nonEmpty) {
+        BuildingTypeClass* const* b = *reinterpret_cast<BuildingTypeClass* const* const*>(ep + off);
+        BuildingTypeClass* const* e = *reinterpret_cast<BuildingTypeClass* const* const*>(ep + off + 4);
+        nonEmpty = false;
+        if (!b || !e || e < b || (e - b) > 4096 || !Readable(b, static_cast<size_t>(e - b) * sizeof(*b))) return false;
+        nonEmpty = (e != b);
+        for (auto p = b; p != e; ++p) if (*p == a->Type) return true;
+        return false;
+    };
+    bool ne = false;
+    bool found = inList(0x144, ne);
+    if (ne && !found) return true;
+    found = inList(0x150, ne);
+    return ne && found;
+}
+
+// Native anchor predicate (0x4A8EB0): an own BaseNormal building, or -- with GameModeOptions.BuildOffAlly -- a
+// building whose owner IsAlliedWith(us) (true for self too) and whose type has EligibileForAllyBuilding; minus the
+// Phobos exclusions above.
+static bool IsPlaceAnchor(BuildingClass* b, HouseClass* pAgent, BuildingTypeClass* proposed)
 {
     if (!b || b->InLimbo || !b->Type || !b->Owner) return false;
+    if (PhobosAnchorExcluded(b, proposed)) return false;
     if (b->Owner == pAgent && b->Type->BaseNormal) return true;
     return GameModeOptionsClass::Instance.BuildOffAlly && b->Type->EligibileForAllyBuilding && b->Owner->IsAlliedWith(pAgent);
 }
@@ -1269,7 +1306,7 @@ bool Bridge::PlaceAllowed(BuildingTypeClass* bt, int x, int y, HouseClass* pAgen
             if (cx >= x && cx < x + w && cy >= y && cy < y + h) continue;   // native excludes the whole w x h rectangle
             CellStruct cs; cs.X = static_cast<short>(cx); cs.Y = static_cast<short>(cy);
             CellClass* c = MapClass::Instance.TryGetCellAt(cs);
-            if (c && IsPlaceAnchor(c->GetBuilding(), pAgent)) return true;
+            if (c && IsPlaceAnchor(c->GetBuilding(), pAgent, bt)) return true;
         }
     return false;
 }

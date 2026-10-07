@@ -696,8 +696,7 @@ void Bridge::OnFrame()
     privCopy.raw_trk_vehicles = locScore.raw_trk_vehicles;
     privCopy.raw_trk_aircraft = locScore.raw_trk_aircraft;
     privCopy.raw_trk_buildings = locScore.raw_trk_buildings;
-    if (!(g_termBits & 1u))   // after game over the score screen shows these anyway, so the public OBS may carry them
-    {
+    {   // ALWAYS zero the privileged fields in the public OBS (also after game over / own defeat); BridgePriv only
         locScore.kills_units_by_us = 0; locScore.kills_buildings_by_us = 0;
         locScore.raw_trk_infantry = 0; locScore.raw_trk_vehicles = 0;
         locScore.raw_trk_aircraft = 0; locScore.raw_trk_buildings = 0;

@@ -92,12 +92,17 @@ namespace
         TechnoTypeClass* pTT = TechnoTypeClass::GetByTypeAndIndex(abs, a.type_id);
         if (!pTT)                                                // GUARD: index in-range
             return ACT_BAD_INDEX;
+        // The naval flag is DERIVED from the type, never trusted: a caller-chosen flag would let one land type occupy both
+        // Primary_ForVehicles and Primary_ForShips (parallel production a human cannot do). Mismatch = bad request.
+        const bool typeNaval = pTT->Naval;
+        if ((a.is_naval != 0) != typeNaval)
+            return ACT_BAD_INDEX;
         if (!pAgent->HasFactoryForObject(pTT))
             return ACT_REJECTED_NOFACTORY;
         if (pAgent->CanBuild(pTT, false, true) != CanBuildResult::Buildable)
             return ACT_REJECTED_CANBUILD;
         EventClass ev(pAgent->ArrayIndex, EventType::Produce,
-            static_cast<int>(abs), a.type_id, a.is_naval ? TRUE : FALSE);  // ctor 0x4C6970
+            static_cast<int>(abs), a.type_id, typeNaval ? TRUE : FALSE);  // ctor 0x4C6970
         EventClass::OutList.Add(ev);                                       // 0x00A802C8 (human path)
         return ACT_OK;
     }
@@ -110,6 +115,8 @@ namespace
         if (!pTT)
             return ACT_BAD_INDEX;
         BuildingTypeClass* pBT = static_cast<BuildingTypeClass*>(pTT);
+        if ((a.is_naval != 0) != pBT->Naval)   // canonical flag only (see DoProduce)
+            return ACT_BAD_INDEX;
         CellStruct cell { static_cast<short>(a.cell_x), static_cast<short>(a.cell_y) };
         // Human-UI preconditions that Building::Unlimbo (the PLACE event path) does NOT enforce: a matching
         // building is ready, the whole foundation is explored, and it is inside the build radius. Reject here,
@@ -131,7 +138,7 @@ namespace
             (pBT->PowersUpBuilding[0] == '\0' && !pBT->CanPlaceHere(&cell, pAgent)))   // upgrades: host check replaces CanPlaceHere
             return ACT_PLACE_INVALID_CELL;
         EventClass ev(pAgent->ArrayIndex, EventType::Place, AbstractType::BuildingType,
-            a.type_id, a.is_naval ? 1 : 0, cell);                // ctor 0x4C6AE0
+            a.type_id, pBT->Naval ? 1 : 0, cell);                // ctor 0x4C6AE0
         EventClass::OutList.Add(ev);
         return ACT_OK;
     }
