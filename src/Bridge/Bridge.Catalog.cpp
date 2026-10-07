@@ -689,6 +689,20 @@ namespace
         else j.Null(key);
     }
 
+    // Waypoint lookup through the engine/Phobos accessors (Phobos hooks 0x68BDC0/0x68BD80/0x68BCC0 and keeps the data in
+    // its scenario extension, so ScenarioClass::Waypoints is all zeros). IsDefinedWaypoint MUST be checked first: the
+    // Phobos getter can insert an undefined entry. Returns false for undefined slots.
+    bool WaypointCell(int i, short& x, short& y)
+    {
+        ScenarioClass* sc = ScenarioClass::Instance;
+        if (i < 0 || i >= 702 || !Readable(sc, sizeof(ScenarioClass))) return false;
+        if (!sc->IsDefinedWaypoint(i)) return false;
+        CellStruct cs = sc->GetWaypointCoords(i);
+        if (cs.X < 0 || cs.Y < 0) return false;
+        x = cs.X; y = cs.Y;
+        return true;
+    }
+
     // Coordinate-bearing script arguments are redacted (-1) when the destination is shrouded, so private
     // scenario scripts cannot disclose unexplored locations. Covered actions: 4 (packed cell: x=arg%128,
     // y=arg/128) and the waypoint-index actions 1 (attack waypoint), 3 (move to waypoint), 15 (spy on
@@ -705,10 +719,7 @@ namespace
         {
             if (arg < 0 || arg >= 702) return -1;
             if (arg < 8 && !SessionClass::IsCampaign()) return arg;   // start waypoints public only in MP/skirmish
-            ScenarioClass* sc = ScenarioClass::Instance;
-            if (!Readable(sc, sizeof(ScenarioClass))) return -1;
-            x = sc->Waypoints[arg].X; y = sc->Waypoints[arg].Y;
-            if (x < 0 || y < 0) return arg;      // undefined waypoint: nothing to hide
+            if (!WaypointCell(arg, x, y)) return arg;      // undefined waypoint: nothing to hide
         }
         else return arg;
         CellStruct cs; cs.X = x; cs.Y = y;
@@ -899,15 +910,13 @@ namespace
         }
         j.Close(']');
 
-        // ---- Map waypoints (702 slots; undefined == X<0 || Y<0, read directly from the array)
+        // ---- Map waypoints (702 slots; via IsDefinedWaypoint/GetWaypointCoords, undefined skipped)
         j.Open("waypoints", '[');
         {
-            ScenarioClass* s = ScenarioClass::Instance;
-            if (Readable(s, sizeof(ScenarioClass)))
-                for (int i = 0; i < 702; ++i)
+            for (int i = 0; i < 702; ++i)
                 {
-                    short x = s->Waypoints[i].X, y = s->Waypoints[i].Y;
-                    if (x < 0 || y < 0) continue;
+                    short x, y;
+                    if (!WaypointCell(i, x, y)) continue;   // undefined slots are skipped, never emitted as zeros
                     if (i >= 8 || SessionClass::IsCampaign())   // 0..7 = player starts: public via the lobby preview in MP/skirmish only
                     {
                         CellStruct wc; wc.X = x; wc.Y = y;
@@ -1225,7 +1234,8 @@ static bool UpgradeHostOK(BuildingTypeClass* bt, int x, int y, HouseClass* pAgen
     CellStruct cs; cs.X = static_cast<short>(x); cs.Y = static_cast<short>(y);
     CellClass* c = MapClass::Instance.TryGetCellAt(cs);
     if (!c) return false;
-    CoordStruct co; co.X = x * 256 + 128; co.Y = y * 256 + 128; co.Z = 0;
+    // Native passes a ZERO offset (two zeroed ints, address passed; callee reads it as a Point2D): offset (0,0), alt=false.
+    CoordStruct co; co.X = 0; co.Y = 0; co.Z = 0;
     ObjectClass* o = c->GetSomeObject(co, false);
     if (!o || o->WhatAmI() != AbstractType::Building) return false;
     BuildingClass* host = static_cast<BuildingClass*>(o);

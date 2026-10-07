@@ -13,6 +13,7 @@
 *  arbitrary agent house is a Phase 3 concern.
 */
 #include <windows.h>
+#include <cstddef>
 #include <unordered_map>
 #include <vector>
 #include <cstdlib>
@@ -183,10 +184,8 @@ namespace
             PubBegin();
             // Invalidate the whole public payload (score, counts, grid, placement, frame metadata) under the
             // seqlock so the previous match's terminal data can never be accepted as current.
-            const uint64_t keepSeq = g_obs->pub_seq;
             const uint32_t keepMagic = g_obs->header.magic, keepVer = g_obs->header.version;
-            memset(g_obs, 0, sizeof(*g_obs));
-            g_obs->pub_seq = keepSeq;
+            memset(g_obs, 0, offsetof(BridgeOBS, pub_seq));   // pub_seq stays odd (PubBegin) for the whole reset
             g_obs->header.magic = keepMagic; g_obs->header.version = keepVer;
             g_obs->placement_type_id = -1;
             g_obs->step_k = static_cast<uint32_t>(g_stepK);
