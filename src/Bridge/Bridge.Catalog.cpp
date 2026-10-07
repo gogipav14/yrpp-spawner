@@ -687,6 +687,35 @@ namespace
         else j.Null(key);
     }
 
+    // Coordinate-bearing script arguments are redacted (-1) when the destination is shrouded, so private
+    // scenario scripts cannot disclose unexplored locations. Covered actions: 4 (packed cell: x=arg%128,
+    // y=arg/128) and the waypoint-index actions 1 (attack waypoint), 3 (move to waypoint), 15 (spy on
+    // building at waypoint), 16 (patrol to waypoint). Waypoints 0..7 (player starts) are public.
+    // Not covered: any other action whose argument is a waypoint or cell (none identified).
+    int RedactScriptArg(int action, int arg)
+    {
+        short x = -1, y = -1;
+        if (action == 4)
+        {
+            if (arg < 0) return arg;
+            x = static_cast<short>(arg % 128); y = static_cast<short>(arg / 128);
+        }
+        else if (action == 1 || action == 3 || action == 15 || action == 16)
+        {
+            if (arg < 0 || arg >= 702) return -1;
+            if (arg < 8) return arg;
+            ScenarioClass* sc = ScenarioClass::Instance;
+            if (!Readable(sc, sizeof(ScenarioClass))) return -1;
+            x = sc->Waypoints[arg].X; y = sc->Waypoints[arg].Y;
+            if (x < 0 || y < 0) return arg;      // undefined waypoint: nothing to hide
+        }
+        else return arg;
+        CellStruct cs; cs.X = x; cs.Y = y;
+        CellClass* c = MapClass::Instance.TryGetCellAt(cs);
+        if (!c || c->IsShrouded()) return -1;
+        return arg;
+    }
+
     int DumpScripts(int counts[5])
     {
         FILE* f = fopen("ai_scripts.json", "w");
@@ -740,7 +769,10 @@ namespace
                     }
                 }
                 j.Close(']');
-                j.Dbl("weight_current", t->Weight_Current);
+                // Weight_Current mutates during play (RegisterSuccess/Failure) and is restored by save-load: only the
+                // authored initial value is public, i.e. the value captured on a fresh scenario start (frame <= 60).
+                if (Unsorted::CurrentFrame <= 60) j.Dbl("weight_initial", t->Weight_Current);
+                else j.Null("weight_initial");
                 j.Dbl("weight_min", t->Weight_Minimum);
                 j.Dbl("weight_max", t->Weight_Maximum);
                 j.Bool("is_for_skirmish", t->IsForSkirmish);
@@ -860,7 +892,7 @@ namespace
                 {
                     j.Open(nullptr, '[');
                     j.Int(nullptr, t->ScriptActions[k].Action);
-                    j.Int(nullptr, t->ScriptActions[k].Argument);
+                    j.Int(nullptr, RedactScriptArg(t->ScriptActions[k].Action, t->ScriptActions[k].Argument));
                     j.Close(']');
                 }
                 j.Close(']');
@@ -1026,7 +1058,7 @@ namespace
                         cs.Y = static_cast<short>(y);
                         if (!MapClass::Instance.TryGetCellAt(cs)) continue;
                         if (++tests > maxTests) break;
-                        if (!Bridge::FoundationUnshrouded(bt, x, y)) continue;   // never probe hidden foundations
+                        if (!Bridge::PlaceAllowed(bt, x, y, pAgent)) continue;   // shroud + human proximity rule, before the live query
                         if (!bt->CanPlaceHere(&cs, pAgent)) continue;
                         if (nc >= maxCand) continue;
                         int best = 255;
@@ -1170,6 +1202,38 @@ bool Bridge::FoundationUnshrouded(BuildingTypeClass* bt, int x, int y)
         if (!c || c->IsShrouded()) return false;
     }
     return true;
+}
+
+// Human-UI proximity rule (reimplemented read-only from Rules: BuildingType.Adjacent; the engine's own checker
+// 0x4A8EB0 takes UI-global foundation state so it is not called). A new (non-wall) building must have a foundation
+// cell within Adjacent+1 cells (Chebyshev) of a foundation cell of one of the agent's BaseNormal buildings.
+bool Bridge::PlaceAllowed(BuildingTypeClass* bt, int x, int y, HouseClass* pAgent)
+{
+    if (!bt || !pAgent) return false;
+    if (!Bridge::FoundationUnshrouded(bt, x, y)) return false;
+    if (bt->Wall) return true;                       // walls: engine rule differs; legality query still applies
+    const int reach = bt->Adjacent + 1;
+    const CellStruct* nf = bt->GetFoundationData(false);
+    CellStruct one[2] = { {0, 0}, {0x7FFF, 0x7FFF} };
+    if (!nf) nf = one;
+    DynamicVectorClass<BuildingClass*>& bl = BuildingClass::Array;
+    for (int i = 0; i < bl.Count; ++i)
+    {
+        BuildingClass* b = bl.Items[i];
+        if (!b || b->Owner != pAgent || b->InLimbo || !b->Type || !b->Type->BaseNormal) continue;
+        CellStruct m = b->GetMapCoords();
+        const CellStruct* bf = b->Type->GetFoundationData(false);
+        CellStruct one2[2] = { {0, 0}, {0x7FFF, 0x7FFF} };
+        if (!bf) bf = one2;
+        for (int a = 0; a < 256 && !(nf[a].X == 0x7FFF && nf[a].Y == 0x7FFF); ++a)
+            for (int c = 0; c < 256 && !(bf[c].X == 0x7FFF && bf[c].Y == 0x7FFF); ++c)
+            {
+                int dx = (x + nf[a].X) - (m.X + bf[c].X); if (dx < 0) dx = -dx;
+                int dy = (y + nf[a].Y) - (m.Y + bf[c].Y); if (dy < 0) dy = -dy;
+                if ((dx > dy ? dx : dy) <= reach) return true;
+            }
+    }
+    return false;
 }
 
 void Bridge::ReadScore(HouseClass* pAgent, BridgeScore& s)

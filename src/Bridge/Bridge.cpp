@@ -13,6 +13,8 @@
 *  arbitrary agent house is a Phase 3 concern.
 */
 #include <windows.h>
+#include <unordered_map>
+#include <vector>
 #include <cstdlib>
 
 #include "Bridge.h"
@@ -33,11 +35,15 @@
 #include <Utilities/Debug.h>
 #include <GameModeOptionsClass.h>
 #include <ObjectTypeClass.h>
+#include <FootClass.h>
+#include <LocomotionClass.h>
 
 namespace
 {
     HANDLE     g_hMap = nullptr;
     BridgeOBS* g_obs  = nullptr;
+    std::unordered_map<DWORD, int32_t> g_uidToHandle;
+    std::vector<DWORD> g_handleToUid(1, 0u);
 
     char g_obsName[96] = {};
     char g_actName[96] = {};
@@ -142,6 +148,8 @@ namespace
         Bridge::ResetRuleDump();
         Bridge::ResetPlacement();
         Bridge::ResetSeenOre();
+        g_uidToHandle.clear();
+        g_handleToUid.assign(1, 0u);
         g_agentIdx = -1;
         g_agentPtr = nullptr;
         g_termBits = 0;
@@ -277,21 +285,30 @@ namespace
     }
 
 
-    // Shared local-player object-visibility predicate (entities AND grid channel 4).
-    // Precondition: t is non-allied with `me`. The cell must already be unshrouded.
-    //  * Cloaked / Cloaking: hidden unless one of my sensor arrays covers the cell (what the engine draws).
-    //  * Disguised (Spy / Mirage) and not seen through (IsClearlyVisibleTo / my disguise sensors):
-    //    only the APPARENT type/owner is exposed; a non-techno disguise (terrain) emits nothing.
+    // Shared local-player object-visibility adapter (entities AND grid channel 4).
+    // Precondition: t is non-allied with `me` (real owner). Follows the engine's own visual state:
+    //  * cell unshrouded (fog unsupported, see SeenOre);
+    //  * TechnoClass::VisualCharacter(VARIANT_TRUE, me) (0x703860, const/pure) == Hidden -> not emitted. This covers
+    //    Invisible= types and the cloak state machine per transition phase (a Cloaking unit is still drawn normally
+    //    until the engine says otherwise; sensors/allies are handled inside);
+    //  * foot locomotor Visual_Character == Hidden (tunnel/underground) -> not emitted;
+    //  * disguised (Spy/Mirage) and not seen through: hostility is judged from the APPARENT owner. An apparent
+    //    own/allied disguise is omitted entirely (so enemy[] membership cannot unmask it); a terrain disguise is
+    //    omitted; otherwise only the apparent type/owner is emitted.
     struct Seen { bool visible; bool disguised; ObjectTypeClass* aType; HouseClass* aOwner; };
     Seen EnemySeen(HouseClass* me, TechnoClass* t, CellClass* cell)
     {
         Seen r = { false, false, nullptr, nullptr };
         if (!cell || cell->IsShrouded() || cell->IsFogged()) return r;
-        const unsigned idx = static_cast<unsigned>(me->ArrayIndex);
-        if (t->CloakState == CloakState::Cloaked || t->CloakState == CloakState::Cloaking)
+        if (t->VisualCharacter(VARIANT_TRUE, me) == VisualType::Hidden) return r;
+        const AbstractType rt = t->WhatAmI();
+        if (rt == AbstractType::Unit || rt == AbstractType::Infantry || rt == AbstractType::Aircraft)
         {
-            if (idx >= 24 || !cell->Sensors_InclHouse(idx)) return r;
+            FootClass* f = static_cast<FootClass*>(t);
+            ILocomotion* loco = f->Locomotor.GetInterfacePtr();
+            if (loco && loco->Visual_Character(true) == VisualType::Hidden) return r;
         }
+        const unsigned idx = static_cast<unsigned>(me->ArrayIndex);
         if (t->IsDisguised() && !t->IsClearlyVisibleTo(me) && !(idx < 24 && cell->DisguiseSensors_InclHouse(idx)))
         {
             ObjectTypeClass* ty = t->GetDisguise(true);
@@ -299,16 +316,31 @@ namespace
             const AbstractType w = ty->WhatAmI();
             if (w != AbstractType::InfantryType && w != AbstractType::UnitType &&
                 w != AbstractType::AircraftType && w != AbstractType::BuildingType) return r;
-            r.visible = true; r.disguised = true; r.aType = ty; r.aOwner = t->GetDisguiseHouse(true);
+            HouseClass* ah = t->GetDisguiseHouse(true);
+            if (!ah || ah == me || me->IsAlliedWith(ah)) return r;   // looks friendly: indistinguishable from own/ally
+            r.visible = true; r.disguised = true; r.aType = ty; r.aOwner = ah;
             return r;
         }
         r.visible = true;
         return r;
     }
 
+    // Opaque per-match handles replace raw UniqueID (a global allocator whose gaps reveal hidden production).
+    // Assigned sequentially (1,2,3..) the first time an object is EMITTED; stable for the rest of the match
+    // (kept while the object leaves/re-enters view); reset in ResetMatch. Same int32 field width as before.
+    int32_t HandleFor(DWORD uid)
+    {
+        auto it = g_uidToHandle.find(uid);
+        if (it != g_uidToHandle.end()) return it->second;
+        int32_t h = static_cast<int32_t>(g_handleToUid.size());
+        g_handleToUid.push_back(uid);
+        g_uidToHandle.emplace(uid, h);
+        return h;
+    }
+
     void FillApparent(BridgeEntity& e, TechnoClass* pT, const Seen& s, HouseClass* me)
     {
-        e.unique_id = static_cast<int32_t>(pT->UniqueID);
+        e.unique_id = HandleFor(pT->UniqueID);
         e.type_id = s.aType->GetArrayIndex();
         switch (s.aType->WhatAmI())
         {
@@ -326,7 +358,7 @@ namespace
 
     void FillEntity(BridgeEntity& e, TechnoClass* pT, TechnoTypeClass* pType, uint8_t ownerKind)
     {
-        e.unique_id     = static_cast<int32_t>(pT->UniqueID);   // stable handle for ACT targeting
+        e.unique_id     = HandleFor(pT->UniqueID);              // opaque per-match handle for ACT targeting
         e.type_id       = pType->GetArrayIndex();               // per-RTTI-category index
         e.category_rtti = static_cast<uint8_t>(pT->WhatAmI());  // Unit/Building/Infantry/Aircraft
 
@@ -342,6 +374,12 @@ namespace
         e.state    = 0;
         e.group_id = ownerKind;                                 // owner_kind (see OwnerKind)
     }
+}
+
+int Bridge::HandleToUid(int handle)
+{
+    if (handle <= 0 || handle >= static_cast<int>(g_handleToUid.size())) return -1;
+    return static_cast<int>(g_handleToUid[handle]);
 }
 
 void Bridge::OnFrame()

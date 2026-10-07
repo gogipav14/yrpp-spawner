@@ -102,6 +102,9 @@ struct BridgePlaceCell            // one legal top-left cell for the building th
     uint8_t ore;                 // sum of tiberium value within 6 cells (clamped 255)
 };
 
+// PRIVILEGED BLOCK: kills_units_by_us, kills_buildings_by_us and raw_trk_* are fed by engine RegisterKill with no
+// observer-visibility check, so they can confirm hidden kills. They are TRAINING-REWARD / critic ONLY and must never
+// be an actor/policy input. lost_*, credits_*, income_derived, stolen_credits are own-side and public.
 struct BridgeScore               // cumulative since match start; slots 2-5 are UNVERIFIED raw (see ReadScore)
 {
     uint32_t kills_units_by_us;       // sum over enemy houses e of agent.KilledUnitsOfHouses[e]  (v7 fix; was killed_units_total)
@@ -210,7 +213,13 @@ namespace Bridge
     // Fairness-gated ore value for a cell (0..255): shrouded -> 0; visible -> live (and cached);
     // fogged -> last value seen while visible (fog on) / live (fog off). Read-only on game memory.
     int SeenOre(CellClass* c);
-    void ResetSeenOre();                                  // clear ore cache + frame tracking (match/scenario reset)
+    void ResetSeenOre();
+    // OBS entity unique_id is an opaque per-match handle (1,2,3.. in first-emitted order), NOT the engine UniqueID.
+    // Returns the engine UniqueID for a handle, or -1 if the handle was never issued.
+    int HandleToUid(int handle);
+    // Human-UI PLACE preconditions that Building::Unlimbo skips: whole foundation unshrouded AND within the
+    // Adjacent radius of an own BaseNormal building.
+    bool PlaceAllowed(BuildingTypeClass* bt, int x, int y, HouseClass* pAgent);                                  // clear ore cache + frame tracking (match/scenario reset)
     // True iff every cell of the building's foundation anchored at (x,y) is on the map and unshrouded.
     bool FoundationUnshrouded(BuildingTypeClass* bt, int x, int y);
     void ReadScore(HouseClass* pAgent, BridgeScore& s);   // v7 score-screen counters (read-only)

@@ -26,6 +26,7 @@
 #include <BuildingTypeClass.h>
 #include <ObjectClass.h>
 #include <EventClass.h>
+#include <FactoryClass.h>
 #include <TargetClass.h>
 #include <Fundamentals.h>          // Unsorted::CurrentFrame
 #include <GeneralDefinitions.h>    // AbstractType / EventType / Mission / CanBuildResult
@@ -62,7 +63,11 @@ namespace
     {
         if (unique < 0)
             return nullptr;
-        DWORD uid = static_cast<DWORD>(unique);
+        // `unique` is an opaque OBS handle; an unissued handle resolves like an absent id (-> BAD_TARGET).
+        int real = Bridge::HandleToUid(unique);
+        if (real < 0)
+            return nullptr;
+        DWORD uid = static_cast<DWORD>(real);
         DynamicVectorClass<TechnoClass*>& arr = TechnoClass::Array;
         for (int i = 0; i < arr.Count; ++i)
         {
@@ -106,10 +111,23 @@ namespace
             return ACT_BAD_INDEX;
         BuildingTypeClass* pBT = static_cast<BuildingTypeClass*>(pTT);
         CellStruct cell { static_cast<short>(a.cell_x), static_cast<short>(a.cell_y) };
-        // GUARD: legal foundation -- but only probe the live legality query when the whole foundation is
-        // explored (otherwise the result code would reveal hidden blockers). The PLACE itself is never
-        // blocked: the engine validates it on execution, as for a human clicking anywhere.
-        if (Bridge::FoundationUnshrouded(pBT, cell.X, cell.Y) && !pBT->CanPlaceHere(&cell, pAgent))
+        // Human-UI preconditions that Building::Unlimbo (the PLACE event path) does NOT enforce: a matching
+        // building is ready, the whole foundation is explored, and it is inside the build radius. Reject here,
+        // with the same codes a human mis-click gets, BEFORE any live legality query or enqueue.
+        bool ready = false;
+        {
+            DynamicVectorClass<FactoryClass*>& facs = FactoryClass::Array;
+            for (int i = 0; i < facs.Count && !ready; ++i)
+            {
+                FactoryClass* f = facs.Items[i];
+                if (!f || f->Owner != pAgent || !f->Object) continue;
+                if (f->Object->WhatAmI() != AbstractType::Building || !f->IsDone()) continue;
+                if (f->Object->GetTechnoType() == pBT) ready = true;
+            }
+        }
+        if (!ready)
+            return ACT_REJECTED_CANBUILD;
+        if (!Bridge::PlaceAllowed(pBT, cell.X, cell.Y, pAgent) || !pBT->CanPlaceHere(&cell, pAgent))
             return ACT_PLACE_INVALID_CELL;
         EventClass ev(pAgent->ArrayIndex, EventType::Place, AbstractType::BuildingType,
             a.type_id, a.is_naval ? 1 : 0, cell);                // ctor 0x4C6AE0
