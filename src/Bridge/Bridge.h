@@ -36,6 +36,8 @@ enum class ActType : uint8_t
     NOOP = 0, PRODUCE = 1, PLACE = 2, SET_PRIMARY = 3, SELL = 4,
     GROUP_MOVE = 5, GROUP_ATTACK = 6, GROUP_FORM = 7, SUPERWEAPON = 8, STANCE = 9,
     DEPLOY = 10,   // deploy a deployable unit (e.g. MCV -> Construction Yard) by target_unique
+    STOP = 11,     // EventType::Idle for own unit target_unique (human 'S' key)
+    GUARD = 12,    // MegaMission Mission::Guard (stance 0) / Mission::Area_Guard (stance 1) for own unit (human 'G' key)
 };
 
 // Result codes the DLL writes back after executing an action.

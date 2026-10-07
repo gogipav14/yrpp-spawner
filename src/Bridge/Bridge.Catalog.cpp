@@ -32,6 +32,10 @@
 #include <BuildingClass.h>
 #include <MapClass.h>
 #include <CellClass.h>
+#include <TechnoTypeClass.h>
+#include <WeaponTypeClass.h>
+#include <WarheadTypeClass.h>
+#include <BulletTypeClass.h>
 
 namespace
 {
@@ -207,6 +211,272 @@ namespace
         j.Close('}');
     }
 
+    // ---- v2 combat dump (rules_types.json "dump_version" 2). PUBLIC rules data only (rulesmd + map
+    // overrides, identical for every player): read from the type objects, never from live objects.
+    const char* ArmorName(int a)
+    {
+        // YRpp/GeneralDefinitions.h:590-602 enum class Armor (also the index into WarheadTypeClass::Verses)
+        static const char* const n[11] = { "none", "flak", "plate", "light", "medium", "heavy", "wood",
+            "steel", "concrete", "special_1", "special_2" };
+        return (a >= 0 && a < 11) ? n[a] : "unknown";
+    }
+
+    const char* MovementZoneName(int m)
+    {
+        // YRpp/GeneralDefinitions.h:1007-1023
+        static const char* const n[14] = { "None", "Normal", "Crusher", "Destroyer", "AmphibiousDestroyer",
+            "AmphibiousCrusher", "Amphibious", "Subterrannean", "Infantry", "InfantryDestroyer", "Fly",
+            "Water", "WaterBeach", "CrusherAll" };
+        return (m >= -1 && m < 13) ? n[m + 1] : "unknown";
+    }
+
+    const char* SpeedTypeName(int m)
+    {
+        // YRpp/GeneralDefinitions.h:1330-1341
+        static const char* const n[9] = { "None", "Foot", "Track", "Wheel", "Hover", "Winged", "Float",
+            "Amphibious", "FloatBeach" };
+        return (m >= -1 && m < 8) ? n[m + 1] : "unknown";
+    }
+
+    // Well-known YR locomotor CLSIDs; unknown -> "" (Python then uses the raw GUID string).
+    const char* LocomotorName(const _GUID& g)
+    {
+        struct E { unsigned long d1; const char* n; };
+        static const E tab[] = {
+            { 0x4A582741ul, "Drive" },  { 0x4A582742ul, "Hover" },  { 0x4A582743ul, "Tunnel" },
+            { 0x4A582744ul, "Walk" },   { 0x4A582746ul, "Fly" },    { 0x4A582747ul, "Teleport" },
+            { 0x55D141B8ul, "Mech" },   { 0x92612C46ul, "Jumpjet" }, { 0xB7B49766ul, "Rocket" },
+            { 0x2BEA74E1ul, "Ship" },
+        };
+        for (const E& e : tab)
+            if (g.Data1 == e.d1) return e.n;
+        return "";
+    }
+
+    void WarheadObj(J& j, const char* key, const WarheadTypeClass* w)
+    {
+        if (!Readable(w, sizeof(WarheadTypeClass))) { j.Null(key); return; }
+        j.Open(key, '{');
+        j.Str("id", w->ID, sizeof(w->ID));
+        j.Open("verses", '[');                                  // WarheadTypeClass.h:67 double Verses[0xB], index = Armor enum
+        for (int i = 0; i < 11; ++i) j.Dbl(nullptr, w->Verses[i]);
+        j.Close(']');
+        j.Dbl("prone_damage", w->ProneDamage);                  // :69
+        j.Dbl("cell_spread", w->CellSpread);                    // :75
+        j.Bool("wall", w->Wall);                                // :83
+        j.Bool("wood", w->Wood);                                // :86
+        j.Bool("tiberium", w->Tiberium);                        // :87
+        j.Bool("sonic", w->Sonic);                              // :90
+        j.Bool("fire", w->Fire);                                // :91
+        j.Bool("conventional", w->Conventional);                // :92
+        j.Bool("em_effect", w->EMEffect);                       // :99
+        j.Bool("mind_control", w->MindControl);                 // :100
+        j.Bool("poison", w->Poison);                            // :101
+        j.Bool("parasite", w->Parasite);                        // :104
+        j.Bool("temporal", w->Temporal);                        // :105
+        j.Bool("airstrike", w->Airstrike);                      // :108
+        j.Int("paralyzes", w->Paralyzes);                       // :111
+        j.Bool("culling", w->Culling);                          // :112
+        j.Bool("radiation", w->Radiation);                      // :115
+        j.Bool("psychic_damage", w->PsychicDamage);             // :116
+        j.Bool("affects_allies", w->AffectsAllies);             // :117
+        j.Close('}');
+    }
+
+    void WeaponObj(J& j, const char* key, const WeaponStruct& ws)
+    {
+        const WeaponTypeClass* w = ws.WeaponType;
+        if (!Readable(w, sizeof(WeaponTypeClass))) { j.Null(key); return; }
+        j.Open(key, '{');
+        j.Str("id", w->ID, sizeof(w->ID));
+        j.Int("range_leptons", w->Range);                       // WeaponTypeClass.h:71 (int(256*ini))
+        j.Dbl("range_cells", w->Range / 256.0);
+        j.Int("min_range_leptons", w->MinimumRange);            // :72
+        j.Dbl("min_range_cells", w->MinimumRange / 256.0);
+        j.Int("damage", w->Damage);                             // :67
+        j.Int("rof", w->ROF);                                   // :70
+        j.Int("burst", w->Burst);                               // :65
+        j.Int("projectile_speed", w->Speed);                    // :68
+        j.Bool("omni_fire", w->OmniFire);                       // :85
+        j.Bool("lobber", w->Lobber);                            // :88
+        j.Bool("is_sonic", w->IsSonic);                         // :90
+        j.Bool("spawner", w->Spawner);                          // :91
+        j.Bool("decloak_to_fire", w->DecloakToFire);            // :93
+        j.Bool("never_use", w->NeverUse);                       // :96
+        j.Bool("infinite_mind_control", w->InfiniteMindControl);// :103
+        j.Bool("fire_while_moving", w->FireWhileMoving);        // :104
+        j.Bool("suicide", w->Suicide);                          // :107
+        j.Bool("is_laser", w->IsLaser);                         // :112
+        j.Bool("area_fire", w->AreaFire);                       // :119
+        j.Bool("is_railgun", w->IsRailgun);                     // :87
+        j.Bool("turret_locked", ws.TurretLocked);               // TechnoTypeClass.h:61
+        const BulletTypeClass* b = w->Projectile;               // :66
+        if (Readable(b, sizeof(BulletTypeClass)))
+        {
+            j.Open("projectile", '{');
+            j.Str("id", b->ID, sizeof(b->ID));
+            j.Bool("aa", b->AA);                                // BulletTypeClass.h:92 can target air
+            j.Bool("ag", b->AG);                                // :93 can target ground
+            j.Bool("arcing", b->Arcing);                        // :83
+            j.Bool("inviso", b->Inviso);                        // :86
+            j.Bool("level", b->Level);                          // :85
+            j.Bool("inaccurate", b->Inaccurate);                // :90
+            j.Close('}');
+        }
+        else
+            j.Null("projectile");
+        WarheadObj(j, "warhead", w->Warhead);                   // :69
+        j.Close('}');
+    }
+
+    void AbilitiesObj(J& j, const char* key, const AbilitiesStruct& a)
+    {
+        j.Open(key, '{');                                       // TechnoTypeClass.h:20-39
+        j.Bool("faster", a.FASTER); j.Bool("stronger", a.STRONGER); j.Bool("firepower", a.FIREPOWER);
+        j.Bool("scatter", a.SCATTER); j.Bool("rof", a.ROF); j.Bool("sight", a.SIGHT); j.Bool("cloak", a.CLOAK);
+        j.Bool("tiberium_proof", a.TIBERIUM_PROOF); j.Bool("vein_proof", a.VEIN_PROOF);
+        j.Bool("self_heal", a.SELF_HEAL); j.Bool("explodes", a.EXPLODES);
+        j.Bool("radar_invisible", a.RADAR_INVISIBLE); j.Bool("sensors", a.SENSORS);
+        j.Bool("fearless", a.FEARLESS); j.Bool("c4", a.C4); j.Bool("tiberium_heal", a.TIBERIUM_HEAL);
+        j.Bool("guard_area", a.GUARD_AREA); j.Bool("crusher", a.CRUSHER);
+        j.Close('}');
+    }
+
+    void DumpCombat(J& j, TechnoTypeClass* t, AbstractType rtti)
+    {
+        j.Open("combat", '{');
+        j.Int("strength", t->Strength);                              // ObjectTypeClass.h:77
+        j.Int("armor", static_cast<int>(t->Armor));                  // ObjectTypeClass.h:76
+        j.Str("armor_name", ArmorName(static_cast<int>(t->Armor)));
+        j.Int("speed", t->Speed);                                    // TechnoTypeClass.h:319
+        j.Int("speed_type", static_cast<int>(t->SpeedType));         // :320
+        j.Str("speed_type_name", SpeedTypeName(static_cast<int>(t->SpeedType)));
+        j.Int("movement_zone", static_cast<int>(t->MovementZone));   // :285
+        j.Str("movement_zone_name", MovementZoneName(static_cast<int>(t->MovementZone)));
+        {
+            char g[40];
+            const _GUID& L = t->Locomotor;                           // :210
+            sprintf(g, "%08lX-%04X-%04X", L.Data1, static_cast<unsigned>(L.Data2), static_cast<unsigned>(L.Data3));
+            j.Str("locomotor_guid", g);
+            j.Str("locomotor", LocomotorName(L));
+        }
+        j.Bool("naval", t->Naval);                                   // :427
+        j.Bool("considered_aircraft", t->ConsideredAircraft);        // :500
+        j.Bool("is_air", rtti == AbstractType::AircraftType || t->ConsideredAircraft || t->JumpJet
+            || t->MovementZone == MovementZone::Fly);                // derived (:498, :500, :285)
+        j.Bool("jumpjet", t->JumpJet);                               // :498
+        j.Bool("crusher", t->Crusher);                               // :452
+        j.Bool("omni_crusher", t->OmniCrusher);                      // :453
+        j.Bool("omni_crush_resistant", t->OmniCrushResistant);       // :454
+        j.Bool("crushable", t->Crushable);                           // ObjectTypeClass.h:103
+        j.Bool("selectable", t->Selectable);                         // ObjectTypeClass.h:106
+        j.Int("sight", t->Sight);                                    // :292
+        j.Int("guard_range", t->GuardRange);                         // :286
+        j.Int("flight_level", t->FlightLevel);                       // :307
+        j.Dbl("size", t->Size);                                      // :216
+        j.Dbl("size_limit", t->SizeLimit);                           // :217
+        j.Dbl("weight", t->Weight);                                  // :214
+        j.Int("passengers", t->Passengers);                          // :290
+        j.Bool("open_topped", t->OpenTopped);                        // :291
+        j.Int("threat_posed", t->ThreatPosed);                       // :317
+        j.Int("weapon_count", t->WeaponCount);                       // :386
+        j.Int("turret_count", t->TurretCount);                       // :385
+        j.Int("air_range_bonus", t->AirRangeBonus);                  // :324
+
+        WeaponObj(j, "primary", t->Weapon[0]);                       // :390
+        WeaponObj(j, "secondary", t->Weapon[1]);
+        WeaponObj(j, "elite_primary", t->EliteWeapon[0]);            // :392
+        WeaponObj(j, "elite_secondary", t->EliteWeapon[1]);
+
+        j.Bool("cloakable", t->Cloakable);                           // :429
+        j.Bool("can_disguise", t->CanDisguise);                      // :459
+        j.Bool("perma_disguise", t->PermaDisguise);                  // :460
+        j.Bool("detect_disguise", t->DetectDisguise);                // :461
+        j.Bool("self_healing", t->SelfHealing);                      // :440
+        j.Bool("organic", t->Organic);                               // :501
+        j.Bool("teleporter", t->Teleporter);                         // :433
+        j.Bool("gattling", t->IsGattling);                           // :434
+        j.Bool("explodes", t->Explodes);                             // :441
+        j.Bool("is_train", t->IsTrain);                              // :401
+        j.Bool("resource_gatherer", t->ResourceGatherer);            // :293
+        j.Bool("resource_destination", t->ResourceDestination);      // :294
+        j.Bool("sensors", t->Sensors);                               // :410
+        j.Int("sensors_sight", t->SensorsSight);                     // :297
+        j.Bool("gap_generator", t->GapGenerator);                    // :430
+        j.Bool("trainable", t->Trainable);                           // :395
+        j.Bool("immune_to_psionics", t->ImmuneToPsionics);           // :465
+        j.Bool("type_immune", t->TypeImmune);                        // :393
+        j.Bool("opportunity_fire", t->OpportunityFire);              // :339
+        j.Bool("mobile_fire", t->MobileFire);                        // :338
+        j.Bool("deploy_fire", t->DeployFire);                        // :336
+        j.Bool("distributed_fire", t->DistributedFire);              // :340
+        j.Bool("attack_friendlies", t->AttackFriendlies);            // :345
+        j.Bool("prevent_attack_move", t->PreventAttackMove);         // :348
+        j.Bool("can_passive_aquire", t->CanPassiveAquire);           // :503
+        j.Bool("can_retaliate", t->CanRetaliate);                    // :504
+        j.Bool("default_to_guard_area", t->DefaultToGuardArea);      // :469
+        j.Int("ammo", t->Ammo);                                      // :322
+        j.Int("initial_ammo", t->InitialAmmo);                       // :321
+        j.Int("reload", t->Reload);                                  // :331
+        j.Bool("spawned", t->Spawned);                               // :480 (is a spawn, e.g. Kirov drone)
+        j.Int("spawns_number", t->SpawnsNumber);                     // :482
+        TypeRef(j, "spawns", t->Spawns);                             // :481
+        j.Bool("slaved", t->Slaved);                                 // :474
+        TypeRef(j, "enslaves", t->Enslaves);                         // :475
+        j.Int("slaves_number", t->SlavesNumber);                     // :476
+        TypeRef(j, "deploys_into", t->DeploysInto);                  // :237
+        TypeRef(j, "undeploys_into", t->UndeploysInto);              // :238
+        AbilitiesObj(j, "veteran_abilities", t->VeteranAbilities);   // :194
+        AbilitiesObj(j, "elite_abilities", t->EliteAbilities);       // :195
+        if (rtti == AbstractType::UnitType)
+        {
+            UnitTypeClass* u = static_cast<UnitTypeClass*>(t);
+            j.Bool("harvester", u->Harvester);                       // UnitTypeClass.h:61
+            j.Bool("weeder", u->Weeder);                             // :62
+            j.Bool("deploy_to_fire", u->DeployToFire);               // :65
+            j.Bool("simple_deployer", u->IsSimpleDeployer);          // :66
+        }
+        else if (rtti == AbstractType::InfantryType)
+        {
+            InfantryTypeClass* i = static_cast<InfantryTypeClass*>(t);
+            j.Bool("engineer", i->Engineer);                         // InfantryTypeClass.h:109
+            j.Bool("infiltrate", i->Infiltrate);                     // :104
+            j.Bool("agent", i->Agent);                               // :110
+            j.Bool("thief", i->Thief);                               // :111
+            j.Bool("vehicle_thief", i->VehicleThief);                // :112
+            j.Bool("deployer", i->Deployer);                         // :114
+            j.Bool("c4", i->C4);                                     // :108
+            j.Bool("cyborg", i->Cyborg);                             // :95
+            j.Bool("fearless", i->Fearless);                         // :102
+            j.Bool("crawls", i->Crawls);                             // :103
+            j.Bool("occupier", i->Occupier);                         // :99
+            j.Bool("civilian", i->Civilian);                         // :107
+        }
+        else if (rtti == AbstractType::AircraftType)
+        {
+            AircraftTypeClass* a = static_cast<AircraftTypeClass*>(t);
+            j.Bool("carryall", a->Carryall);                         // AircraftTypeClass.h:49
+            j.Bool("fighter", a->Fighter);                           // :58
+            j.Bool("airport_bound", a->AirportBound);                // :57
+            j.Bool("landable", a->Landable);                         // :54
+        }
+        else if (rtti == AbstractType::BuildingType)
+        {
+            BuildingTypeClass* b = static_cast<BuildingTypeClass*>(t);
+            j.Bool("capturable", b->Capturable);                     // BuildingTypeClass.h:208
+            j.Bool("can_c4", b->CanC4);                              // :213
+            j.Bool("can_be_occupied", b->CanBeOccupied);             // :217
+            j.Int("max_occupants", b->MaxNumberOccupants);           // :219
+            j.Bool("bunker", b->Bunker);                             // :240
+            j.Bool("hospital", b->Hospital);                         // :262
+            j.Bool("armory", b->Armory);                             // :263
+            j.Bool("radar", b->Radar);                               // :233
+            j.Int("superweapon", b->SuperWeapon);                    // :285
+            j.Int("superweapon2", b->SuperWeapon2);                  // :286
+        }
+        j.Close('}');
+    }
+
     void DumpTechno(J& j, TechnoTypeClass* t, int arrayIndex, AbstractType rtti, HouseClass* pAgent)
     {
         j.Open(nullptr, '{');
@@ -255,6 +525,8 @@ namespace
             j.Bool("factory_plant", b->FactoryPlant);
         }
 
+        DumpCombat(j, t, rtti);
+
         if (pAgent)
         {
             // Same call as the PRODUCE path (Bridge.Act.cpp DoProduce): HouseClass::CanBuild(type, false, true).
@@ -288,6 +560,7 @@ namespace
         J j(f);
         int n = 0;
         j.Open(nullptr, '{');
+        j.Int("dump_version", 2);   // 1 = M4 (no "combat" objects); 2 = + per-type "combat" (M6)
         j.Int("agent_house_index", pAgent ? pAgent->ArrayIndex : -1);
         j.Open("types", '[');
         n += DumpTypeArray(j, BuildingTypeClass::Array, AbstractType::BuildingType, pAgent);

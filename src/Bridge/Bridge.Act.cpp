@@ -148,6 +148,21 @@ namespace
         return ACT_OK;
     }
 
+    // GUARD: same MegaMission construction as DoGroupOrder (ctor 0x4C6860) with Mission::Guard (stance 0)
+    // or Mission::Area_Guard (stance 1); empty target/dest/follow. Own LIVE unit only. OutList only.
+    ActResult DoGuard(HouseClass* pAgent, const BridgeAction& a)
+    {
+        TechnoClass* pU = ResolveTechno(a.target_unique);
+        if (!pU || pU->Owner != pAgent)
+            return ACT_BAD_TARGET;
+        TargetClass whom(static_cast<AbstractClass*>(pU));
+        TargetClass none1, none2, none3;
+        Mission m = (a.stance == 1) ? Mission::Area_Guard : Mission::Guard;
+        EventClass ev(pAgent->ArrayIndex, whom, m, none1, none2, none3);
+        EventClass::OutList.Add(ev);
+        return ACT_OK;
+    }
+
     ActResult DoSuperWeapon(HouseClass* pAgent, const BridgeAction& a)
     {
         if (a.type_id < 0 || a.type_id >= pAgent->Supers.Count)  // GUARD: Supers bounds
@@ -170,6 +185,8 @@ namespace
         case ActType::DEPLOY:       return EmitWhomEvent(pAgent, EventType::Deploy,  ResolveTechno(a.target_unique));
         case ActType::SET_PRIMARY:  return EmitWhomEvent(pAgent, EventType::Primary, ResolveTechno(a.target_unique));
         case ActType::SELL:         return EmitWhomEvent(pAgent, EventType::Sell,    ResolveTechno(a.target_unique));
+        case ActType::STOP:         return EmitWhomEvent(pAgent, EventType::Idle,    ResolveTechno(a.target_unique));
+        case ActType::GUARD:        return DoGuard(pAgent, a);
         case ActType::GROUP_MOVE:   return DoGroupOrder(pAgent, a, false);
         case ActType::GROUP_ATTACK: return DoGroupOrder(pAgent, a, true);
         case ActType::SUPERWEAPON:  return DoSuperWeapon(pAgent, a);
