@@ -525,8 +525,7 @@ void Bridge::OnFrame()
                 if (gx >= G) gx = G - 1;
 
                 o->grid[0][gy][gx] = static_cast<uint8_t>((static_cast<int>(c->Passability) * 255) / 7);
-                int ore = c->GetContainedTiberiumValue();
-                if (ore > 255) ore = 255;
+                int ore = Bridge::SeenOre(c);   // shroud/fog-gated (0 unexplored, last-seen under fog)
                 if (ore > 0 && static_cast<uint8_t>(ore) > o->grid[1][gy][gx]) o->grid[1][gy][gx] = static_cast<uint8_t>(ore);
                 uint8_t fog = c->IsShrouded() ? 0 : (c->IsFogged() ? 1 : 2);
                 if (fog > o->grid[2][gy][gx]) o->grid[2][gy][gx] = fog;

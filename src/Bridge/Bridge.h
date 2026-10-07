@@ -13,6 +13,7 @@
 #include <cstdint>
 
 class HouseClass;
+class CellClass;
 namespace BridgeContract
 {
     constexpr uint32_t MAGIC     = 0x59524252u; // 'YRBR'
@@ -205,6 +206,9 @@ namespace Bridge
     void UpdatePlacement(HouseClass* pAgent, int frame, bool decision, bool lockstep,
                          int32_t& outType, uint8_t& outRtti, uint16_t& outN, BridgePlaceCell* outCells);
     void ResetPlacement();
+    // Fairness-gated ore value for a cell (0..255): shrouded -> 0; visible -> live (and cached);
+    // fogged -> last value seen while visible (fog on) / live (fog off). Read-only on game memory.
+    int SeenOre(CellClass* c);
     void ReadScore(HouseClass* pAgent, BridgeScore& s);   // v7 score-screen counters (read-only)
     void DumpRulesOnce(HouseClass* pAgent);
     void ResetRuleDump();   // re-arm on match reset

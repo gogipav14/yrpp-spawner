@@ -36,6 +36,8 @@
 #include <WeaponTypeClass.h>
 #include <WarheadTypeClass.h>
 #include <BulletTypeClass.h>
+#include <GameModeOptionsClass.h>
+#include <Fundamentals.h>
 
 namespace
 {
@@ -950,7 +952,7 @@ namespace
                 CellClass* c = MapClass::Instance.TryGetCellAt(cs);
                 if (c)
                 {
-                    int v = c->GetContainedTiberiumValue();
+                    int v = Bridge::SeenOre(c);
                     if (v > 0) sum += v;
                     if (sum >= 255) return 255;
                 }
@@ -1108,6 +1110,34 @@ namespace
         return s > 0x7FFFFFFF ? 0x7FFFFFFFu : static_cast<uint32_t>(s);
     }
     uint32_t Pos(int v) { return v > 0 ? static_cast<uint32_t>(v) : 0u; }
+}
+
+// Fairness-gated ore read (shared by the vision grid and the placement hints).
+//  shrouded            -> 0 (never explored)
+//  visible now         -> live value, stored in the per-cell cache
+//  fogged (explored)   -> fog ON: cached last-seen value (0 if never seen visible);
+//                         fog OFF: live value (an explored cell is always shown live to a human)
+// Only reads game memory; the cache lives in the bridge.
+int Bridge::SeenOre(CellClass* c)
+{
+    static unsigned char s_oreCache[512 * 512];
+    static int s_lastFrame = 0;
+    if (!c) return 0;
+    const int f = Unsorted::CurrentFrame;
+    if (f < s_lastFrame) memset(s_oreCache, 0, sizeof(s_oreCache));   // new match
+    s_lastFrame = f;
+    if (c->IsShrouded()) return 0;
+    const bool fogged = c->IsFogged();
+    const bool fogOn = GameModeOptionsClass::Instance.FogOfWar;
+    const int x = c->MapCoords.X, y = c->MapCoords.Y;
+    const bool inCache = (x >= 0 && x < 512 && y >= 0 && y < 512);
+    if (fogged && fogOn)
+        return inCache ? s_oreCache[y * 512 + x] : 0;
+    int v = c->GetContainedTiberiumValue();
+    if (v < 0) v = 0;
+    if (v > 255) v = 255;
+    if (inCache && !fogged) s_oreCache[y * 512 + x] = static_cast<unsigned char>(v);
+    return v;
 }
 
 void Bridge::ReadScore(HouseClass* pAgent, BridgeScore& s)
