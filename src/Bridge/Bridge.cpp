@@ -42,6 +42,8 @@ namespace
 {
     HANDLE     g_hMap = nullptr;
     BridgeOBS* g_obs  = nullptr;
+    HANDLE      g_hPriv = nullptr;
+    BridgePriv* g_priv  = nullptr;
     std::unordered_map<DWORD, int32_t> g_uidToHandle;
     std::vector<DWORD> g_handleToUid(1, 0u);
 
@@ -257,6 +259,14 @@ namespace
             CloseHandle(g_hMap);
             g_hMap = nullptr;
             return false;
+        }
+        {   // privileged reward-only mapping; failure is non-fatal (rewards then unavailable, actor unaffected)
+            char pn[96];
+            wsprintfA(pn, "%s%s", BridgeContract::PRIV_NAME, g_obsName + lstrlenA(BridgeContract::OBS_NAME));
+            g_hPriv = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(BridgePriv), pn);
+            if (g_hPriv)
+                g_priv = static_cast<BridgePriv*>(MapViewOfFile(g_hPriv, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(BridgePriv)));
+            if (g_priv) { memset(g_priv, 0, sizeof(*g_priv)); g_priv->magic = 0x56495250u; g_priv->version = 1; }
         }
         return true;
     }
@@ -660,6 +670,20 @@ void Bridge::OnFrame()
 
     o->header.frame_seq = static_cast<uint64_t>(curFrame);
     Bridge::ReadScore(pAgent, o->score);
+    // Privileged kill counters leave the public OBS: published to the separate priv mapping, zero here in play.
+    BridgePriv privCopy = {};
+    privCopy.kills_units_by_us = o->score.kills_units_by_us;
+    privCopy.kills_buildings_by_us = o->score.kills_buildings_by_us;
+    privCopy.raw_trk_infantry = o->score.raw_trk_infantry;
+    privCopy.raw_trk_vehicles = o->score.raw_trk_vehicles;
+    privCopy.raw_trk_aircraft = o->score.raw_trk_aircraft;
+    privCopy.raw_trk_buildings = o->score.raw_trk_buildings;
+    if (!(g_termBits & 1u))   // after game over the score screen shows these anyway, so the public OBS may carry them
+    {
+        o->score.kills_units_by_us = 0; o->score.kills_buildings_by_us = 0;
+        o->score.raw_trk_infantry = 0; o->score.raw_trk_vehicles = 0;
+        o->score.raw_trk_aircraft = 0; o->score.raw_trk_buildings = 0;
+    }
     o->placement_type_id = plType;
     o->placement_rtti    = plRtti;
     o->_pad2             = 0;
@@ -670,6 +694,20 @@ void Bridge::OnFrame()
     o->step_timeouts    = g_stepTimeouts;
     o->step_decisions   = g_stepDecisions;
     PubEnd();                    // pub_seq -> even: readers may now accept the snapshot
+    if (g_priv)
+    {
+        volatile uint64_t* ps = &g_priv->pub_seq;
+        *ps = *ps + 1; MemoryBarrier();
+        g_priv->frame_seq = static_cast<uint64_t>(curFrame);
+        g_priv->status = o->header.status;
+        g_priv->kills_units_by_us = privCopy.kills_units_by_us;
+        g_priv->kills_buildings_by_us = privCopy.kills_buildings_by_us;
+        g_priv->raw_trk_infantry = privCopy.raw_trk_infantry;
+        g_priv->raw_trk_vehicles = privCopy.raw_trk_vehicles;
+        g_priv->raw_trk_aircraft = privCopy.raw_trk_aircraft;
+        g_priv->raw_trk_buildings = privCopy.raw_trk_buildings;
+        MemoryBarrier(); *ps = *ps + 1;
+    }
 
     // Throttled validation dump (requires -LOG). Compare vs the on-screen game.
     if ((Unsorted::CurrentFrame % 60) == 0)
@@ -730,6 +768,8 @@ void Bridge::OnScenarioLoad()
 
 void Bridge::Shutdown()
 {
+    if (g_priv) { UnmapViewOfFile(g_priv); g_priv = nullptr; }
+    if (g_hPriv) { CloseHandle(g_hPriv); g_hPriv = nullptr; }
     if (g_obs)  { UnmapViewOfFile(g_obs); g_obs = nullptr; }
     if (g_hMap) { CloseHandle(g_hMap);    g_hMap = nullptr; }
     if (g_hFrameEv) { CloseHandle(g_hFrameEv); g_hFrameEv = nullptr; }

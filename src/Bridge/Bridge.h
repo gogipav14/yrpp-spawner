@@ -26,6 +26,7 @@ namespace BridgeContract
     constexpr int      GRID_DIM      = 64;      // downsampled spatial grid, H = W = 64
     constexpr int      GRID_CHANNELS = 7;       // passability,ore,fog,own_units,enemy_units,own_buildings,height
     constexpr char     OBS_NAME[] = "Local\\yr_bridge_obs";
+    constexpr char     PRIV_NAME[] = "Local\\yr_bridge_priv";   // privileged reward-only mapping (+ _<YR_BRIDGE_ID>)
     constexpr char     ACT_NAME[] = "Local\\yr_bridge_act";
     // Lockstep (opt-in, env YR_BRIDGE_STEP=K): auto-reset events, same "_<id>" suffix rule as the mappings.
     constexpr char     FRAME_EVENT_NAME[] = "Local\\yr_bridge_frame";  // DLL -> Python: decision-frame OBS published
@@ -120,6 +121,25 @@ struct BridgeScore               // cumulative since match start; slots 2-5 are 
     uint32_t income_derived;          // max(0, Balance_now - Balance_first_frame + CreditsSpent): harvest+sell+refund proxy
     uint32_t stolen_credits;          // HouseClass::StolenBuildingsCredits
 };
+
+// PRIVILEGED reward/critic-only mapping "Local\\yr_bridge_priv[_<id>]" (never an actor input). Kill counters come from
+// engine RegisterKill with no observer-visibility gate, so they live HERE and are zero in the public OBS during play.
+struct BridgePriv
+{
+    uint32_t magic;                   // 0x56495250 'PRIV'
+    uint32_t version;                 // 1
+    uint64_t pub_seq;                 // seqlock: odd while the DLL writes
+    uint64_t frame_seq;               // game frame of this snapshot
+    uint32_t status;                  // copy of OBS header.status
+    uint32_t kills_units_by_us;
+    uint32_t kills_buildings_by_us;
+    uint32_t raw_trk_infantry;
+    uint32_t raw_trk_vehicles;
+    uint32_t raw_trk_aircraft;
+    uint32_t raw_trk_buildings;
+    uint32_t _pad;
+};
+static_assert(sizeof(BridgePriv) == 56, "BridgePriv layout");
 
 struct BridgeOBS
 {

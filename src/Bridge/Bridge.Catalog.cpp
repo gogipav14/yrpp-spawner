@@ -37,6 +37,7 @@
 #include <WarheadTypeClass.h>
 #include <BulletTypeClass.h>
 #include <Fundamentals.h>
+#include <GameModeOptionsClass.h>
 
 namespace
 {
@@ -690,17 +691,16 @@ namespace
     // Coordinate-bearing script arguments are redacted (-1) when the destination is shrouded, so private
     // scenario scripts cannot disclose unexplored locations. Covered actions: 4 (packed cell: x=arg%128,
     // y=arg/128) and the waypoint-index actions 1 (attack waypoint), 3 (move to waypoint), 15 (spy on
-    // building at waypoint), 16 (patrol to waypoint). Waypoints 0..7 (player starts) are public.
+    // building at waypoint), 16 (patrol to waypoint), 59 (select building at waypoint): the complete coordinate-bearing set per dispatch audit. Waypoints 0..7 (player starts) are public.
     // Not covered: any other action whose argument is a waypoint or cell (none identified).
     int RedactScriptArg(int action, int arg)
     {
-        short x = -1, y = -1;
+        short x, y;
         if (action == 4)
         {
-            if (arg < 0) return arg;
-            x = static_cast<short>(arg % 128); y = static_cast<short>(arg / 128);
+            x = static_cast<short>(arg % 128); y = static_cast<short>(arg / 128);   // engine decode: signed div, short truncation
         }
-        else if (action == 1 || action == 3 || action == 15 || action == 16)
+        else if (action == 1 || action == 3 || action == 15 || action == 16 || action == 59)
         {
             if (arg < 0 || arg >= 702) return -1;
             if (arg < 8) return arg;
@@ -769,12 +769,9 @@ namespace
                     }
                 }
                 j.Close(']');
-                // Weight_Current mutates during play (RegisterSuccess/Failure) and is restored by save-load: only the
-                // authored initial value is public, i.e. the value captured on a fresh scenario start (frame <= 60).
-                if (Unsorted::CurrentFrame <= 60) j.Dbl("weight_initial", t->Weight_Current);
-                else j.Null("weight_initial");
-                j.Dbl("weight_min", t->Weight_Minimum);
-                j.Dbl("weight_max", t->Weight_Maximum);
+                // weights (Weight_Current/min/max) deliberately NOT dumped: Weight_Current is runtime history and the
+                // teacher takes weights from the stock INIs.
+
                 j.Bool("is_for_skirmish", t->IsForSkirmish);
                 j.Bool("is_base_defense", t->IsForBaseDefense);
                 j.Bool("enabled_easy", t->Enabled_Easy);
@@ -1189,49 +1186,49 @@ int Bridge::SeenOre(CellClass* c)
 
 bool Bridge::FoundationUnshrouded(BuildingTypeClass* bt, int x, int y)
 {
+    // Native UI shroud rule (0x4A9070): every cell of the GetFoundationWidth() x GetFoundationHeight(false)
+    // RECTANGLE (not just FoundationData: 3x3Refinery omits offset (2,1)) must be on the map and unshrouded.
     if (!bt) return false;
-    const CellStruct* fd = bt->GetFoundationData(false);
-    CellStruct one[2] = { {0, 0}, {0x7FFF, 0x7FFF} };
-    if (!fd) fd = one;
-    for (int i = 0; i < 256 && !(fd[i].X == 0x7FFF && fd[i].Y == 0x7FFF); ++i)
-    {
-        CellStruct cs;
-        cs.X = static_cast<short>(x + fd[i].X);
-        cs.Y = static_cast<short>(y + fd[i].Y);
-        CellClass* c = MapClass::Instance.TryGetCellAt(cs);
-        if (!c || c->IsShrouded()) return false;
-    }
+    const int w = bt->GetFoundationWidth(), h = bt->GetFoundationHeight(false);
+    if (w <= 0 || h <= 0 || w > 16 || h > 16) return false;
+    for (int dy = 0; dy < h; ++dy)
+        for (int dx = 0; dx < w; ++dx)
+        {
+            CellStruct cs;
+            cs.X = static_cast<short>(x + dx);
+            cs.Y = static_cast<short>(y + dy);
+            CellClass* c = MapClass::Instance.TryGetCellAt(cs);
+            if (!c || c->IsShrouded()) return false;
+        }
     return true;
 }
 
-// Human-UI proximity rule (reimplemented read-only from Rules: BuildingType.Adjacent; the engine's own checker
-// 0x4A8EB0 takes UI-global foundation state so it is not called). A new (non-wall) building must have a foundation
-// cell within Adjacent+1 cells (Chebyshev) of a foundation cell of one of the agent's BaseNormal buildings.
+// Human-UI placement preconditions that Building::Unlimbo skips (read-only reimplementation):
+//  * shroud over the whole foundation rectangle (skipped for PowersUpBuilding upgrades, as native);
+//  * proximity (0x4A8EB0), NO wall exemption: the new rectangle must be within Adjacent+1 cells (Chebyshev rect
+//    gap) of an anchor building: an own BaseNormal building, or (GameModeOptions.BuildOffAlly) a building whose
+//    owner considers us allied and whose type has EligibileForAllyBuilding.
 bool Bridge::PlaceAllowed(BuildingTypeClass* bt, int x, int y, HouseClass* pAgent)
 {
     if (!bt || !pAgent) return false;
-    if (!Bridge::FoundationUnshrouded(bt, x, y)) return false;
-    if (bt->Wall) return true;                       // walls: engine rule differs; legality query still applies
+    if (bt->PowersUpBuilding[0] == '\0' && !Bridge::FoundationUnshrouded(bt, x, y)) return false;
     const int reach = bt->Adjacent + 1;
-    const CellStruct* nf = bt->GetFoundationData(false);
-    CellStruct one[2] = { {0, 0}, {0x7FFF, 0x7FFF} };
-    if (!nf) nf = one;
+    const int w = bt->GetFoundationWidth(), h = bt->GetFoundationHeight(false);
+    const bool offAlly = GameModeOptionsClass::Instance.BuildOffAlly;
     DynamicVectorClass<BuildingClass*>& bl = BuildingClass::Array;
     for (int i = 0; i < bl.Count; ++i)
     {
         BuildingClass* b = bl.Items[i];
-        if (!b || b->Owner != pAgent || b->InLimbo || !b->Type || !b->Type->BaseNormal) continue;
+        if (!b || b->InLimbo || !b->Type || !b->Owner) continue;
+        bool anchor = (b->Owner == pAgent && b->Type->BaseNormal);
+        if (!anchor && offAlly && b->Owner != pAgent && b->Type->EligibileForAllyBuilding && b->Owner->IsAlliedWith(pAgent))
+            anchor = true;
+        if (!anchor) continue;
         CellStruct m = b->GetMapCoords();
-        const CellStruct* bf = b->Type->GetFoundationData(false);
-        CellStruct one2[2] = { {0, 0}, {0x7FFF, 0x7FFF} };
-        if (!bf) bf = one2;
-        for (int a = 0; a < 256 && !(nf[a].X == 0x7FFF && nf[a].Y == 0x7FFF); ++a)
-            for (int c = 0; c < 256 && !(bf[c].X == 0x7FFF && bf[c].Y == 0x7FFF); ++c)
-            {
-                int dx = (x + nf[a].X) - (m.X + bf[c].X); if (dx < 0) dx = -dx;
-                int dy = (y + nf[a].Y) - (m.Y + bf[c].Y); if (dy < 0) dy = -dy;
-                if ((dx > dy ? dx : dy) <= reach) return true;
-            }
+        const int bw = b->Type->GetFoundationWidth(), bh = b->Type->GetFoundationHeight(false);
+        int gx = x - (m.X + bw - 1); int g2 = m.X - (x + w - 1); if (g2 > gx) gx = g2; if (gx < 0) gx = 0;
+        int gy = y - (m.Y + bh - 1); g2 = m.Y - (y + h - 1); if (g2 > gy) gy = g2; if (gy < 0) gy = 0;
+        if ((gx > gy ? gx : gy) <= reach) return true;
     }
     return false;
 }
