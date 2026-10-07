@@ -83,7 +83,7 @@ struct BridgeEntity
     int16_t  x, y;          // GetMapCoords() cell coords
     uint8_t  category_rtti; // WhatAmI(): Unit=1, Aircraft=2, Building=6, Infantry=15
     uint8_t  hp_frac;       // GetHealthPercentage()*255
-    uint8_t  state;         // bit0 = 1: NOT commandable by a human (own entities only: fails owner/IsControllable/CanBeSelected/CanBeSelectedNow); other bits 0
+    uint8_t  state;         // bit0 = 1: this OWN NON-BUILDING entity is not commandable by a human (fails UnitCommandable); buildings and other owners are ALWAYS 0; other bits 0
     uint8_t  group_id;      // OWNER_KIND (was reserved group id): 0 own, 1 enemy player, 2 neutral/civilian/non-player
 };
 
@@ -240,6 +240,8 @@ namespace Bridge
     int HandleToUid(int handle);
     // Unit-command admission shared by the actions and the OBS entity state bit0 (see Bridge.Act.cpp).
     bool UnitCommandable(TechnoClass* pT, HouseClass* pAgent);
+    // Phobos presence: 1 absent, 2 present + proximity-hook signature verified (0.4.0.2 layout), 3 present but unverified.
+    int PhobosState();
     // Human-UI PLACE preconditions that Building::Unlimbo skips: whole foundation unshrouded AND within the
     // Adjacent radius of an own BaseNormal building.
     bool PlaceAllowed(BuildingTypeClass* bt, int x, int y, HouseClass* pAgent);                                  // clear ore cache + frame tracking (match/scenario reset)

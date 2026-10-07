@@ -1224,7 +1224,7 @@ bool Bridge::FoundationUnshrouded(BuildingTypeClass* bt, int x, int y)
 // Phobos state: 0 unknown, 1 absent (verified: no Phobos.dll in the process -> no extension restrictions exist),
 // 2 verified (Phobos 0.4.0.2 layout: the exported proximity hook starts with the expected code bytes),
 // 3 present but UNVERIFIED -> fail closed (every anchor excluded, i.e. no placement hints / PLACE rejected).
-static int PhobosState()
+static int PhobosStateImpl()
 {
     static int s_state = 0;
     if (s_state) return s_state;
@@ -1256,7 +1256,7 @@ static int PhobosState()
 // unreadable restriction does not prove its absence). A valid EMPTY list is a legitimate "no restriction".
 static bool PhobosAnchorExcluded(BuildingClass* a, BuildingTypeClass* proposed)
 {
-    const int st = PhobosState();
+    const int st = PhobosStateImpl();
     if (st == 1) return false;
     if (st != 2) return true;
     const char* ta = reinterpret_cast<const char*>(a->Type);
@@ -1392,3 +1392,5 @@ void Bridge::ReadScore(HouseClass* pAgent, BridgeScore& s)
         }
     }
 }
+
+int Bridge::PhobosState() { return PhobosStateImpl(); }

@@ -97,13 +97,54 @@ namespace
         return true;
     }
 
-    // Own LIVE unit the human could actually command (see Bridge::UnitCommandable). Everything else is BAD_TARGET.
-    TechnoClass* ResolveControllable(HouseClass* pAgent, int handle)
+    bool Readable(const void* p, size_t n)
+    {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!p || !VirtualQuery(p, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) return false;
+        if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
+        return static_cast<const char*>(p) + n <= static_cast<const char*>(mbi.BaseAddress) + mbi.RegionSize;
+    }
+
+    bool IsFootRtti(AbstractType t)
+    {
+        return t == AbstractType::Unit || t == AbstractType::Infantry || t == AbstractType::Aircraft;
+    }
+
+    // Policy: the bridge never allows MORE than a human can do; being stricter is fine, and edge-case actions the agent
+    // does not need return ACT_UNSUPPORTED. Unit orders (MOVE/ATTACK/GUARD) are FOOT units only that pass
+    // Bridge::UnitCommandable; an owned building target is UNSUPPORTED, anything else BAD_TARGET.
+    TechnoClass* ResolveControllable(HouseClass* pAgent, int handle, ActResult& err)
     {
         TechnoClass* pU = ResolveTechno(handle);
-        if (!Bridge::UnitCommandable(pU, pAgent))
-            return nullptr;
+        if (!pU || pU->InLimbo || pU->Owner != pAgent) { err = ACT_BAD_TARGET; return nullptr; }
+        if (!IsFootRtti(pU->WhatAmI())) { err = ACT_UNSUPPORTED; return nullptr; }
+        if (!Bridge::UnitCommandable(pU, pAgent)) { err = ACT_BAD_TARGET; return nullptr; }
         return pU;
+    }
+
+    // Phobos Ammo.DeployUnlockMinimum/MaximumAmount (TechnoType ext = TechnoTypeClass+0x18; ext+0xE4 / +0xE8, default -1;
+    // offsets confirmed from the installed Phobos 0.4.0.2 INI parser). Fail closed for ammo types when the extension
+    // layout cannot be trusted (signature mismatch / unreadable ext).
+    bool DeployAmmoOK(TechnoClass* pT)
+    {
+        TechnoTypeClass* tt = pT->GetTechnoType();
+        if (!tt) return false;
+        if (tt->Ammo <= 0) return true;                         // no ammo: no ammo restriction possible
+        const int st = Bridge::PhobosState();
+        if (st == 1) return true;                               // Phobos absent
+        if (st != 2) return false;                              // present but unverified: fail closed
+        const char* ext = *reinterpret_cast<const char* const*>(reinterpret_cast<const char*>(tt) + 0x18);
+        if (!ext || !Readable(ext + 0xE4, 8)) return false;
+        const int mn = *reinterpret_cast<const int*>(ext + 0xE4), mx = *reinterpret_cast<const int*>(ext + 0xE8);
+        if (mn >= 0 && pT->Ammo < mn) return false;
+        if (mx >= 0 && pT->Ammo > mx) return false;
+        return true;
+    }
+
+    // STOP / DEPLOY admission (native 0x730ECD / 0x730C38): (IsControllable || IsActive), selectable, not Berzerk. Foot only.
+    bool StopDeployOK(TechnoClass* pT)
+    {
+        return (pT->IsControllable() || pT->IsActive()) && pT->CanBeSelected() && pT->CanBeSelectedNow() && !pT->Berzerk;
     }
 
     ActResult DoProduce(HouseClass* pAgent, const BridgeAction& a)
@@ -170,9 +211,10 @@ namespace
     // v1: single-unit move / attack-move to a cell (groups deferred).
     ActResult DoGroupOrder(HouseClass* pAgent, const BridgeAction& a, bool attackMove)
     {
-        TechnoClass* pU = ResolveControllable(pAgent, a.target_unique);   // own, live, controllable
+        ActResult rerr = ACT_BAD_TARGET;
+        TechnoClass* pU = ResolveControllable(pAgent, a.target_unique, rerr);   // own, live, foot, commandable
         if (!pU)
-            return ACT_BAD_TARGET;
+            return rerr;
         CellStruct cell;
         if (!CellInPlayableRect(a.cell_x, a.cell_y, cell))
             return ACT_BAD_INDEX;
@@ -193,8 +235,8 @@ namespace
     ActResult EmitWhomEvent(HouseClass* pAgent, EventType type, TechnoClass* pT)
     {
         // Per-action admission (what the human UI would allow), NOT one shared control gate:
-        //  * STOP / DEPLOY (unit commands): Bridge::UnitCommandable (owner, live, virtual IsControllable, CanBeSelected,
-        //    CanBeSelectedNow) + DEPLOY needs CanDeploySlashUnload (slot 197, 0x700D50).
+        //  * STOP / DEPLOY: foot units only, (IsControllable||IsActive), selectable, not Berzerk (+ DEPLOY: CanDeploySlashUnload
+        //    slot 197 and the Phobos ammo-unlock window).
         //  * SET_PRIMARY: live owned building with a factory role; no controllability test (an EMP-disabled factory can be
         //    set primary by a human: 0x443450 / 0x448160).
         //  * SELL: live owned building + Building::CanBeSold (vtable slot 38 = 0x4494C0, Unsellable check at 0x4494D2);
@@ -210,6 +252,8 @@ namespace
                 BuildingClass* b = static_cast<BuildingClass*>(pT);
                 if (!b->Type || b->Type->Factory == AbstractType::None)
                     return ACT_BAD_TARGET;
+                if (b->IsPrimaryFactory)          // the human click path suppresses PRIMARY here (it would toggle OFF)
+                    return ACT_NOOP;
             }
             else
             {
@@ -221,9 +265,12 @@ namespace
         }
         else
         {
-            if (!Bridge::UnitCommandable(pT, pAgent))
+            // STOP / DEPLOY: foot units only; buildings (factory STOP, occupant unloading) are UNSUPPORTED by policy.
+            if (!IsFootRtti(pT->WhatAmI()))
+                return ACT_UNSUPPORTED;
+            if (!StopDeployOK(pT))
                 return ACT_BAD_TARGET;
-            if (type == EventType::Deploy && !pT->CanDeploySlashUnload())
+            if (type == EventType::Deploy && (!pT->CanDeploySlashUnload() || !DeployAmmoOK(pT)))
                 return ACT_BAD_TARGET;
         }
         EventClass ev(pAgent->ArrayIndex, EventType::Produce, 0, 0, FALSE);  // known-good base (sets Frame)
@@ -239,9 +286,10 @@ namespace
     // or Mission::Area_Guard (stance 1); empty target/dest/follow. Own LIVE unit only. OutList only.
     ActResult DoGuard(HouseClass* pAgent, const BridgeAction& a)
     {
-        TechnoClass* pU = ResolveControllable(pAgent, a.target_unique);
+        ActResult rerr = ACT_BAD_TARGET;
+        TechnoClass* pU = ResolveControllable(pAgent, a.target_unique, rerr);
         if (!pU)
-            return ACT_BAD_TARGET;
+            return rerr;
         TargetClass whom(static_cast<AbstractClass*>(pU));
         TargetClass none1, none2, none3;
         Mission m = (a.stance == 1) ? Mission::Area_Guard : Mission::Guard;
@@ -323,6 +371,6 @@ void Bridge::DispatchACTFrame()
 // human selection path CanBeSelected + CanBeSelectedNow (0x4AC2CB / 0x4AC2D9).
 bool Bridge::UnitCommandable(TechnoClass* pT, HouseClass* pAgent)
 {
-    return pT && !pT->InLimbo && pT->Owner == pAgent
+    return pT && !pT->InLimbo && pT->Owner == pAgent && !pT->Berzerk
         && pT->IsControllable() && pT->CanBeSelected() && pT->CanBeSelectedNow();
 }
