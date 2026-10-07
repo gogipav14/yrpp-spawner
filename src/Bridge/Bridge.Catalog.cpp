@@ -38,6 +38,7 @@
 #include <BulletTypeClass.h>
 #include <Fundamentals.h>
 #include <GameModeOptionsClass.h>
+#include <SessionClass.h>
 
 namespace
 {
@@ -703,7 +704,7 @@ namespace
         else if (action == 1 || action == 3 || action == 15 || action == 16 || action == 59)
         {
             if (arg < 0 || arg >= 702) return -1;
-            if (arg < 8) return arg;
+            if (arg < 8 && !SessionClass::IsCampaign()) return arg;   // start waypoints public only in MP/skirmish
             ScenarioClass* sc = ScenarioClass::Instance;
             if (!Readable(sc, sizeof(ScenarioClass))) return -1;
             x = sc->Waypoints[arg].X; y = sc->Waypoints[arg].Y;
@@ -907,7 +908,7 @@ namespace
                 {
                     short x = s->Waypoints[i].X, y = s->Waypoints[i].Y;
                     if (x < 0 || y < 0) continue;
-                    if (i >= 8)   // 0..7 = player starts (public via the lobby preview); others only if explored
+                    if (i >= 8 || SessionClass::IsCampaign())   // 0..7 = player starts: public via the lobby preview in MP/skirmish only
                     {
                         CellStruct wc; wc.X = x; wc.Y = y;
                         CellClass* wcell = MapClass::Instance.TryGetCellAt(wc);
@@ -1216,17 +1217,27 @@ static bool IsPlaceAnchor(BuildingClass* b, HouseClass* pAgent)
 // building is an own building of type PowersUpBuilding, anchored exactly at (x,y), with upgrade capacity left.
 static bool UpgradeHostOK(BuildingTypeClass* bt, int x, int y, HouseClass* pAgent)
 {
+    // Mirrors native Unlimbo 0x4408C8-0x44094F / UI helper 0x452670 (disassembled): target = Cell::GetSomeObject
+    // (0x4AA290), must be a Building; same owner; stricmp(PowersUpBuilding, host ID) == 0; then by PowersUpToLevel p:
+    //   p == -1 : host.UpgradeLevel < host.Type.Upgrades (capacity), else the zero-level fallback UpgradeLevel == 0
+    //   1..3    : host.UpgradeLevel == 0 (unupgraded);   anything else: fail.
+    // No host-anchor-equals-cell requirement (native has none).
     CellStruct cs; cs.X = static_cast<short>(x); cs.Y = static_cast<short>(y);
     CellClass* c = MapClass::Instance.TryGetCellAt(cs);
     if (!c) return false;
-    BuildingClass* host = c->GetBuilding();
-    if (!host || host->InLimbo || !host->Type || host->Owner != pAgent) return false;
+    CoordStruct co; co.X = x * 256 + 128; co.Y = y * 256 + 128; co.Z = 0;
+    ObjectClass* o = c->GetSomeObject(co, false);
+    if (!o || o->WhatAmI() != AbstractType::Building) return false;
+    BuildingClass* host = static_cast<BuildingClass*>(o);
+    if (host->InLimbo || !host->Type || host->Owner != pAgent) return false;
     if (lstrcmpiA(host->Type->ID, bt->PowersUpBuilding) != 0) return false;
-    CellStruct m = host->GetMapCoords();
-    if (m.X != x || m.Y != y) return false;
-    int used = 0;
-    for (int i = 0; i < 3; ++i) if (host->Upgrades[i]) ++used;
-    return host->Type->Upgrades > used;
+    const int lvl = static_cast<signed char>(host->UpgradeLevel);
+    const int p = bt->PowersUpToLevel;
+    if (p == -1)
+        return lvl < host->Type->Upgrades || lvl == 0;
+    if (p >= 1 && p <= 3)
+        return lvl == 0;
+    return false;
 }
 
 // Human-UI placement preconditions that Building::Unlimbo skips (read-only reimplementation):
@@ -1242,15 +1253,10 @@ bool Bridge::PlaceAllowed(BuildingTypeClass* bt, int x, int y, HouseClass* pAgen
     const int reach = bt->Adjacent + 1;
     const int w = bt->GetFoundationWidth(), h = bt->GetFoundationHeight(false);
     if (w <= 0 || h <= 0 || w > 16 || h > 16) return false;
-    const CellStruct* fd = bt->GetFoundationData(false);
     for (int cy = y - reach; cy < y + h + reach; ++cy)
         for (int cx = x - reach; cx < x + w + reach; ++cx)
         {
-            bool inFoot = false;
-            if (fd)
-                for (int i = 0; i < 256 && !(fd[i].X == 0x7FFF && fd[i].Y == 0x7FFF); ++i)
-                    if (x + fd[i].X == cx && y + fd[i].Y == cy) { inFoot = true; break; }
-            if (inFoot) continue;
+            if (cx >= x && cx < x + w && cy >= y && cy < y + h) continue;   // native excludes the whole w x h rectangle
             CellStruct cs; cs.X = static_cast<short>(cx); cs.Y = static_cast<short>(cy);
             CellClass* c = MapClass::Instance.TryGetCellAt(cs);
             if (c && IsPlaceAnchor(c->GetBuilding(), pAgent)) return true;

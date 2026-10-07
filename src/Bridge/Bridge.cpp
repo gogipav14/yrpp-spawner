@@ -181,8 +181,14 @@ namespace
         if (g_obs)
         {
             PubBegin();
-            g_obs->header.status = 0;
-            g_obs->step_decisions = 0;
+            // Invalidate the whole public payload (score, counts, grid, placement, frame metadata) under the
+            // seqlock so the previous match's terminal data can never be accepted as current.
+            const uint64_t keepSeq = g_obs->pub_seq;
+            const uint32_t keepMagic = g_obs->header.magic, keepVer = g_obs->header.version;
+            memset(g_obs, 0, sizeof(*g_obs));
+            g_obs->pub_seq = keepSeq;
+            g_obs->header.magic = keepMagic; g_obs->header.version = keepVer;
+            g_obs->placement_type_id = -1;
             g_obs->step_k = static_cast<uint32_t>(g_stepK);
             PubEnd();
         }
