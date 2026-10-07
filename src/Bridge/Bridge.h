@@ -14,6 +14,7 @@
 
 class HouseClass;
 class CellClass;
+class BuildingTypeClass;
 namespace BridgeContract
 {
     constexpr uint32_t MAGIC     = 0x59524252u; // 'YRBR'
@@ -209,6 +210,9 @@ namespace Bridge
     // Fairness-gated ore value for a cell (0..255): shrouded -> 0; visible -> live (and cached);
     // fogged -> last value seen while visible (fog on) / live (fog off). Read-only on game memory.
     int SeenOre(CellClass* c);
+    void ResetSeenOre();                                  // clear ore cache + frame tracking (match/scenario reset)
+    // True iff every cell of the building's foundation anchored at (x,y) is on the map and unshrouded.
+    bool FoundationUnshrouded(BuildingTypeClass* bt, int x, int y);
     void ReadScore(HouseClass* pAgent, BridgeScore& s);   // v7 score-screen counters (read-only)
     void DumpRulesOnce(HouseClass* pAgent);
     void ResetRuleDump();   // re-arm on match reset

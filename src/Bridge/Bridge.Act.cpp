@@ -106,7 +106,10 @@ namespace
             return ACT_BAD_INDEX;
         BuildingTypeClass* pBT = static_cast<BuildingTypeClass*>(pTT);
         CellStruct cell { static_cast<short>(a.cell_x), static_cast<short>(a.cell_y) };
-        if (!pBT->CanPlaceHere(&cell, pAgent))                   // GUARD: legal foundation
+        // GUARD: legal foundation -- but only probe the live legality query when the whole foundation is
+        // explored (otherwise the result code would reveal hidden blockers). The PLACE itself is never
+        // blocked: the engine validates it on execution, as for a human clicking anywhere.
+        if (Bridge::FoundationUnshrouded(pBT, cell.X, cell.Y) && !pBT->CanPlaceHere(&cell, pAgent))
             return ACT_PLACE_INVALID_CELL;
         EventClass ev(pAgent->ArrayIndex, EventType::Place, AbstractType::BuildingType,
             a.type_id, a.is_naval ? 1 : 0, cell);                // ctor 0x4C6AE0

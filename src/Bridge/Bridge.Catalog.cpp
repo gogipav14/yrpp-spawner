@@ -36,7 +36,6 @@
 #include <WeaponTypeClass.h>
 #include <WarheadTypeClass.h>
 #include <BulletTypeClass.h>
-#include <GameModeOptionsClass.h>
 #include <Fundamentals.h>
 
 namespace
@@ -879,6 +878,12 @@ namespace
                 {
                     short x = s->Waypoints[i].X, y = s->Waypoints[i].Y;
                     if (x < 0 || y < 0) continue;
+                    if (i >= 8)   // 0..7 = player starts (public via the lobby preview); others only if explored
+                    {
+                        CellStruct wc; wc.X = x; wc.Y = y;
+                        CellClass* wcell = MapClass::Instance.TryGetCellAt(wc);
+                        if (!wcell || wcell->IsShrouded()) continue;
+                    }
                     ++counts[4];
                     j.Open(nullptr, '[');
                     j.Int(nullptr, i);
@@ -1021,6 +1026,7 @@ namespace
                         cs.Y = static_cast<short>(y);
                         if (!MapClass::Instance.TryGetCellAt(cs)) continue;
                         if (++tests > maxTests) break;
+                        if (!Bridge::FoundationUnshrouded(bt, x, y)) continue;   // never probe hidden foundations
                         if (!bt->CanPlaceHere(&cs, pAgent)) continue;
                         if (nc >= maxCand) continue;
                         int best = 255;
@@ -1114,30 +1120,56 @@ namespace
 
 // Fairness-gated ore read (shared by the vision grid and the placement hints).
 //  shrouded            -> 0 (never explored)
-//  visible now         -> live value, stored in the per-cell cache
-//  fogged (explored)   -> fog ON: cached last-seen value (0 if never seen visible);
-//                         fog OFF: live value (an explored cell is always shown live to a human)
-// Only reads game memory; the cache lives in the bridge.
+//  visible (unfogged)  -> live value, also stored in the per-cell cache
+// FOG NOTE: CellClass::IsFogged() is a stub on this engine (0x5865E0 = `xor al,al; ret 4`), so the
+// fogged branch below is DORMANT: fog-of-war is NOT supported/validated and no fog-on claim is made.
+// The branch is kept only so a future verified IsFogged() yields last-seen ore instead of live ore.
+namespace
+{
+    unsigned char g_oreCache[512 * 512];
+    int g_oreLastFrame = 0;
+}
+
+void Bridge::ResetSeenOre()
+{
+    memset(g_oreCache, 0, sizeof(g_oreCache));
+    g_oreLastFrame = 0;
+}
+
 int Bridge::SeenOre(CellClass* c)
 {
-    static unsigned char s_oreCache[512 * 512];
-    static int s_lastFrame = 0;
     if (!c) return 0;
     const int f = Unsorted::CurrentFrame;
-    if (f < s_lastFrame) memset(s_oreCache, 0, sizeof(s_oreCache));   // new match
-    s_lastFrame = f;
+    if (f < g_oreLastFrame) Bridge::ResetSeenOre();   // backup: frame regression = new match / load
+    g_oreLastFrame = f;
     if (c->IsShrouded()) return 0;
-    const bool fogged = c->IsFogged();
-    const bool fogOn = GameModeOptionsClass::Instance.FogOfWar;
+    const bool fogged = c->IsFogged();                // always false on this engine (stub)
     const int x = c->MapCoords.X, y = c->MapCoords.Y;
     const bool inCache = (x >= 0 && x < 512 && y >= 0 && y < 512);
-    if (fogged && fogOn)
-        return inCache ? s_oreCache[y * 512 + x] : 0;
+    if (fogged)
+        return inCache ? g_oreCache[y * 512 + x] : 0;
     int v = c->GetContainedTiberiumValue();
     if (v < 0) v = 0;
     if (v > 255) v = 255;
-    if (inCache && !fogged) s_oreCache[y * 512 + x] = static_cast<unsigned char>(v);
+    if (inCache) g_oreCache[y * 512 + x] = static_cast<unsigned char>(v);
     return v;
+}
+
+bool Bridge::FoundationUnshrouded(BuildingTypeClass* bt, int x, int y)
+{
+    if (!bt) return false;
+    const CellStruct* fd = bt->GetFoundationData(false);
+    CellStruct one[2] = { {0, 0}, {0x7FFF, 0x7FFF} };
+    if (!fd) fd = one;
+    for (int i = 0; i < 256 && !(fd[i].X == 0x7FFF && fd[i].Y == 0x7FFF); ++i)
+    {
+        CellStruct cs;
+        cs.X = static_cast<short>(x + fd[i].X);
+        cs.Y = static_cast<short>(y + fd[i].Y);
+        CellClass* c = MapClass::Instance.TryGetCellAt(cs);
+        if (!c || c->IsShrouded()) return false;
+    }
+    return true;
 }
 
 void Bridge::ReadScore(HouseClass* pAgent, BridgeScore& s)

@@ -31,6 +31,8 @@
 #include <FactoryClass.h>          // per-factory production state (serial-proof)
 #include <Fundamentals.h>          // Unsorted::CurrentFrame
 #include <Utilities/Debug.h>
+#include <GameModeOptionsClass.h>
+#include <ObjectTypeClass.h>
 
 namespace
 {
@@ -139,6 +141,7 @@ namespace
     {
         Bridge::ResetRuleDump();
         Bridge::ResetPlacement();
+        Bridge::ResetSeenOre();
         g_agentIdx = -1;
         g_agentPtr = nullptr;
         g_termBits = 0;
@@ -273,6 +276,54 @@ namespace
         return c.X >= mb.Left && c.X <= mb.Right && c.Y >= mb.Top && c.Y <= mb.Bottom;
     }
 
+
+    // Shared local-player object-visibility predicate (entities AND grid channel 4).
+    // Precondition: t is non-allied with `me`. The cell must already be unshrouded.
+    //  * Cloaked / Cloaking: hidden unless one of my sensor arrays covers the cell (what the engine draws).
+    //  * Disguised (Spy / Mirage) and not seen through (IsClearlyVisibleTo / my disguise sensors):
+    //    only the APPARENT type/owner is exposed; a non-techno disguise (terrain) emits nothing.
+    struct Seen { bool visible; bool disguised; ObjectTypeClass* aType; HouseClass* aOwner; };
+    Seen EnemySeen(HouseClass* me, TechnoClass* t, CellClass* cell)
+    {
+        Seen r = { false, false, nullptr, nullptr };
+        if (!cell || cell->IsShrouded() || cell->IsFogged()) return r;
+        const unsigned idx = static_cast<unsigned>(me->ArrayIndex);
+        if (t->CloakState == CloakState::Cloaked || t->CloakState == CloakState::Cloaking)
+        {
+            if (idx >= 24 || !cell->Sensors_InclHouse(idx)) return r;
+        }
+        if (t->IsDisguised() && !t->IsClearlyVisibleTo(me) && !(idx < 24 && cell->DisguiseSensors_InclHouse(idx)))
+        {
+            ObjectTypeClass* ty = t->GetDisguise(true);
+            if (!ty) return r;
+            const AbstractType w = ty->WhatAmI();
+            if (w != AbstractType::InfantryType && w != AbstractType::UnitType &&
+                w != AbstractType::AircraftType && w != AbstractType::BuildingType) return r;
+            r.visible = true; r.disguised = true; r.aType = ty; r.aOwner = t->GetDisguiseHouse(true);
+            return r;
+        }
+        r.visible = true;
+        return r;
+    }
+
+    void FillApparent(BridgeEntity& e, TechnoClass* pT, const Seen& s, HouseClass* me)
+    {
+        e.unique_id = static_cast<int32_t>(pT->UniqueID);
+        e.type_id = s.aType->GetArrayIndex();
+        switch (s.aType->WhatAmI())
+        {
+        case AbstractType::InfantryType: e.category_rtti = static_cast<uint8_t>(AbstractType::Infantry); break;
+        case AbstractType::UnitType:     e.category_rtti = static_cast<uint8_t>(AbstractType::Unit); break;
+        case AbstractType::AircraftType: e.category_rtti = static_cast<uint8_t>(AbstractType::Aircraft); break;
+        default:                         e.category_rtti = static_cast<uint8_t>(AbstractType::Building); break;
+        }
+        CellStruct cell = pT->GetMapCoords();
+        e.x = cell.X; e.y = cell.Y;
+        e.hp_frac = 255;                                        // a disguise shows no true health
+        e.state = 0;
+        e.group_id = s.aOwner ? OwnerKind(me, s.aOwner) : 2;
+    }
+
     void FillEntity(BridgeEntity& e, TechnoClass* pT, TechnoTypeClass* pType, uint8_t ownerKind)
     {
         e.unique_id     = static_cast<int32_t>(pT->UniqueID);   // stable handle for ACT targeting
@@ -308,6 +359,16 @@ void Bridge::OnFrame()
             ResetMatch();
         g_wasInMatch = false;
         return;
+    }
+    {
+        static bool s_fogLogged = false;
+        if (!s_fogLogged)
+        {
+            s_fogLogged = true;
+            if (GameModeOptionsClass::Instance.FogOfWar)
+                Debug::Log("[BRIDGE] WARNING: FogOfWar is set but CellClass::IsFogged() is a stub on this engine; "
+                           "fog is UNSUPPORTED (only shroud is gated).\n");
+        }
     }
     if (!g_wasInMatch)
     {
@@ -449,10 +510,11 @@ void Bridge::OnFrame()
             // Current-visibility fog gate (no maphack): the enemy must stand on a
             // cell the agent can see RIGHT NOW, not one it saw at some point.
             CellClass* cell = pT->GetCell();
-            if (cell && !cell->IsShrouded() && !cell->IsFogged())
+            Seen sn = EnemySeen(pAgent, pT, cell);
+            if (sn.visible && nEnemy < BridgeContract::N_ENEMY)
             {
-                if (nEnemy < BridgeContract::N_ENEMY)
-                    FillEntity(o->enemy[nEnemy++], pT, pType, OwnerKind(pAgent, owner));
+                if (sn.disguised) FillApparent(o->enemy[nEnemy++], pT, sn, pAgent);
+                else FillEntity(o->enemy[nEnemy++], pT, pType, OwnerKind(pAgent, owner));
             }
         }
     }
@@ -524,15 +586,22 @@ void Bridge::OnFrame()
                 int gx = (cx * G) / mapW;
                 if (gx >= G) gx = G - 1;
 
-                o->grid[0][gy][gx] = static_cast<uint8_t>((static_cast<int>(c->Passability) * 255) / 7);
+                // Terrain channels (0 passability, 6 height) are gated PER SOURCE CELL before downsampling:
+                // shrouded cells contribute nothing (stay 0 = unknown), so no hidden cell leaks via aggregation.
+                const bool shrouded = c->IsShrouded();
+                if (!shrouded)
+                    o->grid[0][gy][gx] = static_cast<uint8_t>((static_cast<int>(c->Passability) * 255) / 7);
                 int ore = Bridge::SeenOre(c);   // shroud/fog-gated (0 unexplored, last-seen under fog)
                 if (ore > 0 && static_cast<uint8_t>(ore) > o->grid[1][gy][gx]) o->grid[1][gy][gx] = static_cast<uint8_t>(ore);
                 uint8_t fog = c->IsShrouded() ? 0 : (c->IsFogged() ? 1 : 2);
                 if (fog > o->grid[2][gy][gx]) o->grid[2][gy][gx] = fog;
-                int lvl = c->GetLevel();
-                if (lvl < 0) lvl = 0;
-                if (lvl > 255) lvl = 255;
-                o->grid[6][gy][gx] = static_cast<uint8_t>(lvl);
+                if (!shrouded)
+                {
+                    int lvl = c->GetLevel();
+                    if (lvl < 0) lvl = 0;
+                    if (lvl > 255) lvl = 255;
+                    o->grid[6][gy][gx] = static_cast<uint8_t>(lvl);
+                }
 
                 const bool visibleNow = (fog == 2);
                 if (BuildingClass* bld = c->GetBuilding())
@@ -540,12 +609,12 @@ void Bridge::OnFrame()
                 if (UnitClass* u = c->GetUnit(false))
                 {
                     if (u->Owner == pAgent) o->grid[3][gy][gx] = 255;          // own units
-                    else if (visibleNow && u->Owner && !pAgent->IsAlliedWith(u->Owner) && OwnerKind(pAgent, u->Owner) == 1) o->grid[4][gy][gx] = 255;
+                    else if (visibleNow && u->Owner && !pAgent->IsAlliedWith(u->Owner)) { Seen sn = EnemySeen(pAgent, u, c); HouseClass* ho = sn.disguised ? sn.aOwner : u->Owner; if (sn.visible && ho && OwnerKind(pAgent, ho) == 1) o->grid[4][gy][gx] = 255; }
                 }
                 if (InfantryClass* inf = c->GetInfantry(false))
                 {
                     if (inf->Owner == pAgent) o->grid[3][gy][gx] = 255;
-                    else if (visibleNow && inf->Owner && !pAgent->IsAlliedWith(inf->Owner) && OwnerKind(pAgent, inf->Owner) == 1) o->grid[4][gy][gx] = 255;
+                    else if (visibleNow && inf->Owner && !pAgent->IsAlliedWith(inf->Owner)) { Seen sn = EnemySeen(pAgent, inf, c); HouseClass* ho = sn.disguised ? sn.aOwner : inf->Owner; if (sn.visible && ho && OwnerKind(pAgent, ho) == 1) o->grid[4][gy][gx] = 255; }
                 }
             }
         }
