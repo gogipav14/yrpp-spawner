@@ -1091,6 +1091,94 @@ namespace
                     }
             }
 
+        if (nc == 0)
+        {
+            static int s_diagOn = -1;
+            static int s_lastDiag = -1000000;
+            if (s_diagOn < 0) { char e[8] = {}; s_diagOn = (GetEnvironmentVariableA("YR_BRIDGE_PLACEDIAG", e, sizeof(e)) > 0 && e[0] == '1') ? 1 : 0; }
+            if (s_diagOn && Unsorted::CurrentFrame - s_lastDiag >= 300)
+            {
+                s_lastDiag = Unsorted::CurrentFrame;
+                int tot = 0, cnt[5] = {0, 0, 0, 0, 0}, only[5] = {0, 0, 0, 0, 0}, nearDist[5] = {999, 999, 999, 999, 999};
+                int nearX[5] = {0}, nearY[5] = {0};
+                memset(g_visited, 0, sizeof(g_visited));
+                for (int i = 0; i < nb; ++i)
+                {
+                    BuildingClass* b = bl.Items[i];
+                    if (!b || b->InLimbo || !b->Type) continue;
+                    CellStruct m0 = b->GetMapCoords();
+                    for (int y = m0.Y - 20; y <= m0.Y + 20; ++y)
+                        for (int x = m0.X - 20; x <= m0.X + 20; ++x)
+                        {
+                            if (x < 0 || y < 0 || x >= 512 || y >= 512) continue;
+                            if (g_visited[y * 512 + x]) continue;
+                            g_visited[y * 512 + x] = 1;
+                            if (x < mb.Left || x > mb.Right || y < mb.Top || y > mb.Bottom) continue;
+                            ++tot;
+                            int mk = Bridge::PlaceDiagMask(bt, x, y, pAgent);
+                            int bits = 0, which = -1;
+                            for (int k = 0; k < 5; ++k) if (mk & (1 << k)) { ++cnt[k]; ++bits; which = k; }
+                            if (bits == 1 || (bits == 2 && (mk & 12) == 12))
+                            {   // only one predicate (proximity+phobos-only counts as one: phobos)
+                                int kk = (bits == 2) ? 3 : which;
+                                ++only[kk];
+                                int dx = x - m0.X, dy = y - m0.Y; if (dx < 0) dx = -dx; if (dy < 0) dy = -dy;
+                                int d = dx > dy ? dx : dy;
+                                if (d < nearDist[kk]) { nearDist[kk] = d; nearX[kk] = x; nearY[kk] = y; }
+                            }
+                        }
+                }
+{
+                    char dbuf[768];
+                    _snprintf(dbuf, sizeof(dbuf) - 1, "[PLACEDIAG] f=%d type=%s %dx%d adj=%d toTile=%d cells=%d fail: offmap=%d shroud=%d prox=%d phobosOnly=%d canPlace=%d | onlyOne: offmap=%d shroud=%d prox=%d phobos=%d canPlace=%d | nearest-only: shroud(%d,%d) prox(%d,%d) phobos(%d,%d) canPlace(%d,%d) phobosState=%d\n",
+                           Unsorted::CurrentFrame, bt->ID, bt->GetFoundationWidth(), bt->GetFoundationHeight(false), bt->Adjacent, bt->ToTile ? 1 : 0, tot,
+                           cnt[0], cnt[1], cnt[2], cnt[3], cnt[4], only[0], only[1], only[2], only[3], only[4],
+                           nearX[1], nearY[1], nearX[2], nearY[2], nearX[3], nearY[3], nearX[4], nearY[4], Bridge::PhobosState());
+                    dbuf[sizeof(dbuf) - 1] = 0;
+                    Debug::Log("%s", dbuf);
+                    if (FILE* df = fopen("placediag.log", "a"))
+                    {
+                        short axs = ncy > 0 ? cyx[0] : bl.Items[0]->GetMapCoords().X, ays = ncy > 0 ? cyy[0] : bl.Items[0]->GetMapCoords().Y;
+                        fprintf(df, "ncy=%d nb=%d\n", ncy, nb);
+                        if (true)
+                        {   // ASCII map around the first construction yard: O offmap, S shroud, x no-anchor proximity, c CanPlaceHere false, . ok, B building
+                            fprintf(df, "map around CY (%d,%d), rows y, cols x (top-left candidate cells for %s)\n", axs, ays, bt->ID);
+                            for (int y = ays - 14; y <= ays + 16; ++y)
+                            {
+                                for (int x = axs - 16; x <= axs + 18; ++x)
+                                {
+                                    CellStruct q; q.X = static_cast<short>(x); q.Y = static_cast<short>(y);
+                                    CellClass* qc = MapClass::Instance.TryGetCellAt(q);
+                                    char ch;
+                                    if (qc && qc->GetBuilding()) ch = 'B';
+                                    else
+                                    {
+                                        int mk = Bridge::PlaceDiagMask(bt, x, y, pAgent);
+                                        ch = (mk & 1) ? 'O' : (mk & 2) ? 'S' : (mk & 4) ? 'x' : (mk & 16) ? 'c' : '.';
+                                    }
+                                    fputc(ch, df);
+                                }
+                                fputc('\n', df);
+                            }
+                        }
+                        fclose(df);
+                    }
+                    if (nearDist[1] < 999)
+                    {   // the only candidate passing everything except shroud: how much of its rectangle is shrouded?
+                        int sh = 0, tl = 0;
+                        for (int dy = 0; dy < bt->GetFoundationHeight(false); ++dy)
+                            for (int dx = 0; dx < bt->GetFoundationWidth(); ++dx)
+                            {
+                                CellStruct q; q.X = static_cast<short>(nearX[1] + dx); q.Y = static_cast<short>(nearY[1] + dy);
+                                CellClass* qc = MapClass::Instance.TryGetCellAt(q);
+                                ++tl; if (!qc || qc->IsShrouded()) ++sh;
+                            }
+                        if (FILE* df = fopen("placediag.log", "a")) { fprintf(df, "shroud-only candidate (%d,%d): %d of %d rect cells shrouded\n", nearX[1], nearY[1], sh, tl); fclose(df); }
+                    }
+                    if (FILE* df = fopen("placediag.log", "a")) { fputs(dbuf, df); fclose(df); }
+                }
+            }
+        }
         qsort(g_cands, nc, sizeof(Cand), CmpCand);
         int n = nc < BridgeContract::N_PLACE ? nc : BridgeContract::N_PLACE;
         for (int i = 0; i < n; ++i)
@@ -1254,8 +1342,10 @@ static int PhobosStateImpl()
 // or the PROPOSED type's Allowed list is non-empty and lacks TA; or its Disallowed list contains TA.
 // FAIL CLOSED: with Phobos present, any unverified signature or undecodable ext/vector excludes the anchor (an
 // unreadable restriction does not prove its absence). A valid EMPTY list is a legitimate "no restriction".
+static bool g_diagIgnorePhobos = false;   // diagnostics only (YR_BRIDGE_PLACEDIAG)
 static bool PhobosAnchorExcluded(BuildingClass* a, BuildingTypeClass* proposed)
 {
+    if (g_diagIgnorePhobos) return false;
     const int st = PhobosStateImpl();
     if (st == 1) return false;
     if (st != 2) return true;
@@ -1335,11 +1425,17 @@ static bool UpgradeHostOK(BuildingTypeClass* bt, int x, int y, HouseClass* pAgen
 //  * PowersUpBuilding types: upgrade-host validation REPLACES proximity (and the caller skips CanPlaceHere);
 //  * otherwise proximity (0x4A8EB0), walls included: scan the footprint grown by Adjacent+1 EXCLUDING the proposed
 //    footprint cells, and test the actual cell occupants with the anchor predicate.
+static bool ProximityOK(BuildingTypeClass* bt, int x, int y, HouseClass* pAgent);
 bool Bridge::PlaceAllowed(BuildingTypeClass* bt, int x, int y, HouseClass* pAgent)
 {
     if (!bt || !pAgent) return false;
     if (!bt->ToTile && !Bridge::FoundationUnshrouded(bt, x, y)) return false;
     if (bt->PowersUpBuilding[0] != '\0') return UpgradeHostOK(bt, x, y, pAgent);
+    return ProximityOK(bt, x, y, pAgent);
+}
+
+static bool ProximityOK(BuildingTypeClass* bt, int x, int y, HouseClass* pAgent)
+{
     const int reach = bt->Adjacent + 1;
     const int w = bt->GetFoundationWidth(), h = bt->GetFoundationHeight(false);
     if (w <= 0 || h <= 0 || w > 16 || h > 16) return false;
@@ -1394,3 +1490,32 @@ void Bridge::ReadScore(HouseClass* pAgent, BridgeScore& s)
 }
 
 int Bridge::PhobosState() { return PhobosStateImpl(); }
+
+// Diagnostics (YR_BRIDGE_PLACEDIAG=1): per-predicate failure mask for one candidate cell.
+// bit0 off-map / null cell in the w x h rectangle, bit1 shroud (rectangle, unless ToTile), bit2 proximity fails (with
+// Phobos exclusions), bit3 proximity passes only when Phobos exclusions are ignored (Phobos is the blocker),
+// bit4 CanPlaceHere false.
+int Bridge::PlaceDiagMask(BuildingTypeClass* bt, int x, int y, HouseClass* pAgent)
+{
+    int m = 0;
+    const LTRBStruct& mb = MapClass::Instance.MapCoordBounds;
+    const int w = bt->GetFoundationWidth(), h = bt->GetFoundationHeight(false);
+    for (int dy = 0; dy < h && !(m & 1); ++dy)
+        for (int dx = 0; dx < w; ++dx)
+        {
+            CellStruct cs; cs.X = static_cast<short>(x + dx); cs.Y = static_cast<short>(y + dy);
+            if (x + dx < mb.Left || x + dx > mb.Right || y + dy < mb.Top || y + dy > mb.Bottom || !MapClass::Instance.TryGetCellAt(cs))
+            { m |= 1; break; }
+        }
+    if (!bt->ToTile && !Bridge::FoundationUnshrouded(bt, x, y)) m |= 2;
+    if (!ProximityOK(bt, x, y, pAgent))
+    {
+        m |= 4;
+        g_diagIgnorePhobos = true;
+        if (ProximityOK(bt, x, y, pAgent)) m |= 8;
+        g_diagIgnorePhobos = false;
+    }
+    CellStruct cs; cs.X = static_cast<short>(x); cs.Y = static_cast<short>(y);
+    if (!(m & 1) && !bt->CanPlaceHere(&cs, pAgent)) m |= 16;
+    return m;
+}

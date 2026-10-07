@@ -244,7 +244,8 @@ namespace Bridge
     int PhobosState();
     // Human-UI PLACE preconditions that Building::Unlimbo skips: whole foundation unshrouded AND within the
     // Adjacent radius of an own BaseNormal building.
-    bool PlaceAllowed(BuildingTypeClass* bt, int x, int y, HouseClass* pAgent);                                  // clear ore cache + frame tracking (match/scenario reset)
+    bool PlaceAllowed(BuildingTypeClass* bt, int x, int y, HouseClass* pAgent);
+    int PlaceDiagMask(BuildingTypeClass* bt, int x, int y, HouseClass* pAgent);   // YR_BRIDGE_PLACEDIAG diagnostics                                  // clear ore cache + frame tracking (match/scenario reset)
     // True iff every cell of the building's foundation anchored at (x,y) is on the map and unshrouded.
     bool FoundationUnshrouded(BuildingTypeClass* bt, int x, int y);
     void ReadScore(HouseClass* pAgent, BridgeScore& s);   // v7 score-screen counters (read-only)
