@@ -1221,30 +1221,69 @@ bool Bridge::FoundationUnshrouded(BuildingTypeClass* bt, int x, int y)
 // Per candidate anchor A (type TA), A is skipped when: TA.NoBuildAreaOnBuildup && A.Mission == Construction(0x12);
 // or the PROPOSED type's Allowed list is non-empty and lacks TA; or its Disallowed list contains TA. All reads are
 // guarded by Readable() and fall back to "no restriction" if the ext block is unreadable.
+// Phobos state: 0 unknown, 1 absent (verified: no Phobos.dll in the process -> no extension restrictions exist),
+// 2 verified (Phobos 0.4.0.2 layout: the exported proximity hook starts with the expected code bytes),
+// 3 present but UNVERIFIED -> fail closed (every anchor excluded, i.e. no placement hints / PLACE rejected).
+static int PhobosState()
+{
+    static int s_state = 0;
+    if (s_state) return s_state;
+    HMODULE m = GetModuleHandleA("Phobos.dll");
+    if (!m) { s_state = 1; Debug::Log("[BRIDGE] Phobos not loaded: no extension proximity restrictions\n"); return s_state; }
+    static const unsigned char sig[] = {   // prefix of DisplayClass_BuildingProximityCheck_BuildArea in Phobos 0.4.0.2
+        0x8b,0x44,0x24,0x04,0x56,0x57,0x8b,0x78,0x0c,0x8b,0x97,0x20,0x05,0x00,0x00,0x85,0xd2,0x75,0x04,0x33,0xc0,0xeb,0x03,
+        0x8b,0x42,0x18,0x80,0xb8,0x42,0x01,0x00,0x00,0x00,0x74,0x09,0x83,0xbf,0xac,0x00,0x00,0x00,0x12,0x74,0x3e };
+    FARPROC f = GetProcAddress(m, "DisplayClass_BuildingProximityCheck_BuildArea");
+    if (f && Readable(reinterpret_cast<const void*>(f), sizeof(sig)) && memcmp(reinterpret_cast<const void*>(f), sig, sizeof(sig)) == 0)
+    {
+        s_state = 2;
+        Debug::Log("[BRIDGE] Phobos proximity hook signature verified (0.4.0.2 layout)\n");
+    }
+    else
+    {
+        s_state = 3;
+        Debug::Log("[BRIDGE] WARNING: Phobos loaded but proximity hook signature mismatch: placement fails closed\n");
+    }
+    return s_state;
+}
+
+// Installed Phobos hook DisplayClass_BuildingProximityCheck_BuildArea (0x4A8FD7), layout read from the installed
+// Phobos.dll disassembly: BuildingTypeClass+0x18 = Phobos ext pointer; ext+0x142 = NoBuildAreaOnBuildup (byte);
+// ext+0x144/+0x148 = Adjacent.Allowed vector<BuildingTypeClass*> (begin,end); ext+0x150/+0x154 = Adjacent.Disallowed.
+// Per candidate anchor A (type TA), A is skipped when: TA.NoBuildAreaOnBuildup && A.Mission == Construction(0x12);
+// or the PROPOSED type's Allowed list is non-empty and lacks TA; or its Disallowed list contains TA.
+// FAIL CLOSED: with Phobos present, any unverified signature or undecodable ext/vector excludes the anchor (an
+// unreadable restriction does not prove its absence). A valid EMPTY list is a legitimate "no restriction".
 static bool PhobosAnchorExcluded(BuildingClass* a, BuildingTypeClass* proposed)
 {
+    const int st = PhobosState();
+    if (st == 1) return false;
+    if (st != 2) return true;
     const char* ta = reinterpret_cast<const char*>(a->Type);
     const char* pt = reinterpret_cast<const char*>(proposed);
-    if (!Readable(ta + 0x18, 4) || !Readable(pt + 0x18, 4)) return false;
+    if (!Readable(ta + 0x18, 4) || !Readable(pt + 0x18, 4)) return true;
     const char* ea = *reinterpret_cast<const char* const*>(ta + 0x18);
     const char* ep = *reinterpret_cast<const char* const*>(pt + 0x18);
-    if (ea && Readable(ea + 0x142, 1) && *reinterpret_cast<const unsigned char*>(ea + 0x142) &&
-        static_cast<int>(a->CurrentMission) == 0x12)
+    if (!ea || !ep || !Readable(ea + 0x142, 1) || !Readable(ep + 0x144, 0x14)) return true;
+    if (*reinterpret_cast<const unsigned char*>(ea + 0x142) && static_cast<int>(a->CurrentMission) == 0x12)
         return true;
-    if (!ep || !Readable(ep + 0x144, 0x14)) return false;
+    bool bad = false;
     auto inList = [&](int off, bool& nonEmpty) {
         BuildingTypeClass* const* b = *reinterpret_cast<BuildingTypeClass* const* const*>(ep + off);
         BuildingTypeClass* const* e = *reinterpret_cast<BuildingTypeClass* const* const*>(ep + off + 4);
         nonEmpty = false;
-        if (!b || !e || e < b || (e - b) > 4096 || !Readable(b, static_cast<size_t>(e - b) * sizeof(*b))) return false;
-        nonEmpty = (e != b);
+        if (b == e) return false;                                       // valid empty list
+        if (!b || !e || e < b || (e - b) > 4096 || !Readable(b, static_cast<size_t>(e - b) * sizeof(*b))) { bad = true; return false; }
+        nonEmpty = true;
         for (auto p = b; p != e; ++p) if (*p == a->Type) return true;
         return false;
     };
     bool ne = false;
     bool found = inList(0x144, ne);
+    if (bad) return true;
     if (ne && !found) return true;
     found = inList(0x150, ne);
+    if (bad) return true;
     return ne && found;
 }
 

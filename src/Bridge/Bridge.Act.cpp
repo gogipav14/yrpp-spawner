@@ -26,6 +26,7 @@
 #include <BuildingTypeClass.h>
 #include <ObjectClass.h>
 #include <EventClass.h>
+#include <MapClass.h>
 #include <FactoryClass.h>
 #include <TargetClass.h>
 #include <Fundamentals.h>          // Unsorted::CurrentFrame
@@ -84,6 +85,35 @@ namespace
             || abs == AbstractType::InfantryType || abs == AbstractType::AircraftType;
     }
 
+    // Validate the ORIGINAL int32 cell coordinates against the playable map rect BEFORE narrowing to short
+    // ((65536+x, y) must not wrap to (x, y)).
+    bool CellInPlayableRect(int x, int y, CellStruct& out)
+    {
+        const LTRBStruct& mb = MapClass::Instance.MapCoordBounds;
+        if (x < mb.Left || x > mb.Right || y < mb.Top || y > mb.Bottom)
+            return false;
+        out.X = static_cast<short>(x);
+        out.Y = static_cast<short>(y);
+        return true;
+    }
+
+    // Own LIVE unit the human could actually command: owner + the engine's IsControllable (0x700C40, rejects spawned
+    // aircraft etc.). Everything else is BAD_TARGET (same as an absent id).
+    // Native TechnoClass::IsControllable (0x700C40), called directly (read-only predicate).
+    bool NativeControllable(TechnoClass* t)
+    {
+        typedef bool (__thiscall *Fn)(void*);
+        return reinterpret_cast<Fn>(0x700C40)(t);
+    }
+
+    TechnoClass* ResolveControllable(HouseClass* pAgent, int handle)
+    {
+        TechnoClass* pU = ResolveTechno(handle);
+        if (!pU || pU->Owner != pAgent || !NativeControllable(pU))
+            return nullptr;
+        return pU;
+    }
+
     ActResult DoProduce(HouseClass* pAgent, const BridgeAction& a)
     {
         AbstractType abs = static_cast<AbstractType>(a.category_rtti);
@@ -117,7 +147,9 @@ namespace
         BuildingTypeClass* pBT = static_cast<BuildingTypeClass*>(pTT);
         if ((a.is_naval != 0) != pBT->Naval)   // canonical flag only (see DoProduce)
             return ACT_BAD_INDEX;
-        CellStruct cell { static_cast<short>(a.cell_x), static_cast<short>(a.cell_y) };
+        CellStruct cell;
+        if (!CellInPlayableRect(a.cell_x, a.cell_y, cell))
+            return ACT_PLACE_INVALID_CELL;
         // Human-UI preconditions that Building::Unlimbo (the PLACE event path) does NOT enforce: a matching
         // building is ready, the whole foundation is explored, and it is inside the build radius. Reject here,
         // with the same codes a human mis-click gets, BEFORE any live legality query or enqueue.
@@ -146,11 +178,13 @@ namespace
     // v1: single-unit move / attack-move to a cell (groups deferred).
     ActResult DoGroupOrder(HouseClass* pAgent, const BridgeAction& a, bool attackMove)
     {
-        TechnoClass* pU = ResolveTechno(a.target_unique);
-        if (!pU || pU->Owner != pAgent)                         // only order our own LIVE unit
+        TechnoClass* pU = ResolveControllable(pAgent, a.target_unique);   // own, live, controllable
+        if (!pU)
             return ACT_BAD_TARGET;
+        CellStruct cell;
+        if (!CellInPlayableRect(a.cell_x, a.cell_y, cell))
+            return ACT_BAD_INDEX;
         TargetClass whom(static_cast<AbstractClass*>(pU));       // 0x6E6AB0
-        CellStruct cell { static_cast<short>(a.cell_x), static_cast<short>(a.cell_y) };
         TargetClass dest(cell);                                  // 0x6E6B20
         TargetClass tgt, follow;                                 // empty
         Mission m = attackMove ? Mission::AttackMove : Mission::Move;
@@ -166,7 +200,21 @@ namespace
     // so one helper serves all three. The engine handler reads only Whom; leftover union bytes ignored.
     ActResult EmitWhomEvent(HouseClass* pAgent, EventType type, TechnoClass* pT)
     {
-        if (!pT || pT->Owner != pAgent)
+        if (!pT || pT->Owner != pAgent || !NativeControllable(pT))
+            return ACT_BAD_TARGET;
+        // Action-specific human eligibility: SELL needs CanBeSold() (Unsellable=yes etc.); DEPLOY needs CanDeploySlashUnload().
+        if (type == EventType::Sell)
+        {
+            // Building::CanBeSold = BuildingClass vtable slot 38 (0x4494C0, contains the Unsellable check at 0x4494D2); called
+            // by raw slot because the YRpp virtual order for this entry is not trusted. Only buildings can be sold.
+            if (pT->WhatAmI() != AbstractType::Building)
+                return ACT_BAD_TARGET;
+            typedef bool (__thiscall *CanSellFn)(void*);
+            void** vt = *reinterpret_cast<void***>(pT);
+            if (!reinterpret_cast<CanSellFn>(vt[38])(pT))
+                return ACT_BAD_TARGET;
+        }
+        if (type == EventType::Deploy && !pT->CanDeploySlashUnload())
             return ACT_BAD_TARGET;
         EventClass ev(pAgent->ArrayIndex, EventType::Produce, 0, 0, FALSE);  // known-good base (sets Frame)
         ev.Type        = type;
@@ -181,8 +229,8 @@ namespace
     // or Mission::Area_Guard (stance 1); empty target/dest/follow. Own LIVE unit only. OutList only.
     ActResult DoGuard(HouseClass* pAgent, const BridgeAction& a)
     {
-        TechnoClass* pU = ResolveTechno(a.target_unique);
-        if (!pU || pU->Owner != pAgent)
+        TechnoClass* pU = ResolveControllable(pAgent, a.target_unique);
+        if (!pU)
             return ACT_BAD_TARGET;
         TargetClass whom(static_cast<AbstractClass*>(pU));
         TargetClass none1, none2, none3;
@@ -192,16 +240,12 @@ namespace
         return ACT_OK;
     }
 
-    ActResult DoSuperWeapon(HouseClass* pAgent, const BridgeAction& a)
+    // SUPERWEAPON is DISABLED: SpecialPlace reaches ClickFire/Launch without the cursor-path admission checks (Ares
+    // 0x100348D0: shroud, CanFireAt, range, designators, inhibitors), and no verified read-only adapter exists. A
+    // human cannot fire outside those restrictions, so the action is unsupported (no Python caller uses it).
+    ActResult DoSuperWeapon(HouseClass*, const BridgeAction&)
     {
-        if (a.type_id < 0 || a.type_id >= pAgent->Supers.Count)  // GUARD: Supers bounds
-            return ACT_BAD_INDEX;
-        if (!pAgent->Supers.Items[a.type_id])
-            return ACT_BAD_TARGET;
-        CellStruct cell { static_cast<short>(a.cell_x), static_cast<short>(a.cell_y) };
-        EventClass ev(pAgent->ArrayIndex, EventType::SpecialPlace, a.type_id, cell); // 0x4C6B60
-        EventClass::OutList.Add(ev);
-        return ACT_OK;
+        return ACT_UNSUPPORTED;
     }
 
     ActResult ExecuteAction(HouseClass* pAgent, const BridgeAction& a)
