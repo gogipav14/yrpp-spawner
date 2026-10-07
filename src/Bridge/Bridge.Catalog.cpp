@@ -1269,13 +1269,17 @@ static bool PhobosAnchorExcluded(BuildingClass* a, BuildingTypeClass* proposed)
         return true;
     bool bad = false;
     auto inList = [&](int off, bool& nonEmpty) {
-        BuildingTypeClass* const* b = *reinterpret_cast<BuildingTypeClass* const* const*>(ep + off);
-        BuildingTypeClass* const* e = *reinterpret_cast<BuildingTypeClass* const* const*>(ep + off + 4);
+        const uintptr_t b = *reinterpret_cast<const uintptr_t*>(ep + off);
+        const uintptr_t e = *reinterpret_cast<const uintptr_t*>(ep + off + 4);
         nonEmpty = false;
         if (b == e) return false;                                       // valid empty list
-        if (!b || !e || e < b || (e - b) > 4096 || !Readable(b, static_cast<size_t>(e - b) * sizeof(*b))) { bad = true; return false; }
+        // fail closed on malformed vectors: ordering, 4-byte element multiple, bounded count, whole span readable
+        if (b == 0 || e < b || ((e - b) & 3u) != 0 || ((e - b) >> 2) > 4096 ||
+            !Readable(reinterpret_cast<const void*>(b), static_cast<size_t>(e - b))) { bad = true; return false; }
         nonEmpty = true;
-        for (auto p = b; p != e; ++p) if (*p == a->Type) return true;
+        const BuildingTypeClass* const* p = reinterpret_cast<const BuildingTypeClass* const*>(b);
+        const size_t n = static_cast<size_t>((e - b) >> 2);
+        for (size_t k = 0; k < n; ++k) if (p[k] == a->Type) return true;
         return false;
     };
     bool ne = false;

@@ -398,7 +398,7 @@ namespace
         if (hp > 1.0) hp = 1.0;
         e.hp_frac = static_cast<uint8_t>(hp * 255.0);
 
-        e.state    = reinterpret_cast<bool (__thiscall*)(void*)>(0x700C40)(pT) ? 0 : 1;   // native TechnoClass::IsControllable;    // bit0: NOT controllable (spawned aircraft etc.): actions on it are rejected
+        e.state    = (ownerKind == 0 && pT->WhatAmI() != AbstractType::Building && !Bridge::UnitCommandable(pT, HouseClass::CurrentPlayer)) ? 1 : 0;   // bit0: own but not commandable
         e.group_id = ownerKind;                                 // owner_kind (see OwnerKind)
     }
 }

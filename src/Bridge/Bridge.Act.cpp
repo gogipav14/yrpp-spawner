@@ -97,19 +97,11 @@ namespace
         return true;
     }
 
-    // Own LIVE unit the human could actually command: owner + the engine's IsControllable (0x700C40, rejects spawned
-    // aircraft etc.). Everything else is BAD_TARGET (same as an absent id).
-    // Native TechnoClass::IsControllable (0x700C40), called directly (read-only predicate).
-    bool NativeControllable(TechnoClass* t)
-    {
-        typedef bool (__thiscall *Fn)(void*);
-        return reinterpret_cast<Fn>(0x700C40)(t);
-    }
-
+    // Own LIVE unit the human could actually command (see Bridge::UnitCommandable). Everything else is BAD_TARGET.
     TechnoClass* ResolveControllable(HouseClass* pAgent, int handle)
     {
         TechnoClass* pU = ResolveTechno(handle);
-        if (!pU || pU->Owner != pAgent || !NativeControllable(pU))
+        if (!Bridge::UnitCommandable(pU, pAgent))
             return nullptr;
         return pU;
     }
@@ -200,22 +192,40 @@ namespace
     // so one helper serves all three. The engine handler reads only Whom; leftover union bytes ignored.
     ActResult EmitWhomEvent(HouseClass* pAgent, EventType type, TechnoClass* pT)
     {
-        if (!pT || pT->Owner != pAgent || !NativeControllable(pT))
+        // Per-action admission (what the human UI would allow), NOT one shared control gate:
+        //  * STOP / DEPLOY (unit commands): Bridge::UnitCommandable (owner, live, virtual IsControllable, CanBeSelected,
+        //    CanBeSelectedNow) + DEPLOY needs CanDeploySlashUnload (slot 197, 0x700D50).
+        //  * SET_PRIMARY: live owned building with a factory role; no controllability test (an EMP-disabled factory can be
+        //    set primary by a human: 0x443450 / 0x448160).
+        //  * SELL: live owned building + Building::CanBeSold (vtable slot 38 = 0x4494C0, Unsellable check at 0x4494D2);
+        //    no controllability test (Phobos NoManualMove must not block SELL).
+        if (!pT || pT->InLimbo || pT->Owner != pAgent)
             return ACT_BAD_TARGET;
-        // Action-specific human eligibility: SELL needs CanBeSold() (Unsellable=yes etc.); DEPLOY needs CanDeploySlashUnload().
-        if (type == EventType::Sell)
+        if (type == EventType::Sell || type == EventType::Primary)
         {
-            // Building::CanBeSold = BuildingClass vtable slot 38 (0x4494C0, contains the Unsellable check at 0x4494D2); called
-            // by raw slot because the YRpp virtual order for this entry is not trusted. Only buildings can be sold.
             if (pT->WhatAmI() != AbstractType::Building)
                 return ACT_BAD_TARGET;
-            typedef bool (__thiscall *CanSellFn)(void*);
-            void** vt = *reinterpret_cast<void***>(pT);
-            if (!reinterpret_cast<CanSellFn>(vt[38])(pT))
+            if (type == EventType::Primary)
+            {
+                BuildingClass* b = static_cast<BuildingClass*>(pT);
+                if (!b->Type || b->Type->Factory == AbstractType::None)
+                    return ACT_BAD_TARGET;
+            }
+            else
+            {
+                typedef bool (__thiscall *CanSellFn)(void*);
+                void** vt = *reinterpret_cast<void***>(pT);
+                if (!reinterpret_cast<CanSellFn>(vt[38])(pT))
+                    return ACT_BAD_TARGET;
+            }
+        }
+        else
+        {
+            if (!Bridge::UnitCommandable(pT, pAgent))
+                return ACT_BAD_TARGET;
+            if (type == EventType::Deploy && !pT->CanDeploySlashUnload())
                 return ACT_BAD_TARGET;
         }
-        if (type == EventType::Deploy && !pT->CanDeploySlashUnload())
-            return ACT_BAD_TARGET;
         EventClass ev(pAgent->ArrayIndex, EventType::Produce, 0, 0, FALSE);  // known-good base (sets Frame)
         ev.Type        = type;
         ev.IsExecuted  = false;
@@ -306,4 +316,13 @@ void Bridge::DispatchACTFrame()
         Debug::Log("[BRIDGE-ACT] seq=%llu type=%d result=%d\n",
                    static_cast<unsigned long long>(seq), static_cast<int>(act->action.type),
                    static_cast<int>(r));
+}
+
+// Unit-command admission (MOVE/ATTACK/GUARD/STOP/DEPLOY and the OBS "not commandable" bit): owner, live and not limbo,
+// virtual IsControllable (YRpp +0xA0; buildings override it at 0x44F5C0 so the virtual is the right one), and the
+// human selection path CanBeSelected + CanBeSelectedNow (0x4AC2CB / 0x4AC2D9).
+bool Bridge::UnitCommandable(TechnoClass* pT, HouseClass* pAgent)
+{
+    return pT && !pT->InLimbo && pT->Owner == pAgent
+        && pT->IsControllable() && pT->CanBeSelected() && pT->CanBeSelectedNow();
 }
