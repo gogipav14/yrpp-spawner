@@ -127,7 +127,8 @@ namespace
         }
         if (!ready)
             return ACT_REJECTED_CANBUILD;
-        if (!Bridge::PlaceAllowed(pBT, cell.X, cell.Y, pAgent) || !pBT->CanPlaceHere(&cell, pAgent))
+        if (!Bridge::PlaceAllowed(pBT, cell.X, cell.Y, pAgent) ||
+            (pBT->PowersUpBuilding[0] == '\0' && !pBT->CanPlaceHere(&cell, pAgent)))   // upgrades: host check replaces CanPlaceHere
             return ACT_PLACE_INVALID_CELL;
         EventClass ev(pAgent->ArrayIndex, EventType::Place, AbstractType::BuildingType,
             a.type_id, a.is_naval ? 1 : 0, cell);                // ctor 0x4C6AE0

@@ -1056,7 +1056,7 @@ namespace
                         if (!MapClass::Instance.TryGetCellAt(cs)) continue;
                         if (++tests > maxTests) break;
                         if (!Bridge::PlaceAllowed(bt, x, y, pAgent)) continue;   // shroud + human proximity rule, before the live query
-                        if (!bt->CanPlaceHere(&cs, pAgent)) continue;
+                        if (bt->PowersUpBuilding[0] == '\0' && !bt->CanPlaceHere(&cs, pAgent)) continue;   // upgrades: host check in PlaceAllowed
                         if (nc >= maxCand) continue;
                         int best = 255;
                         for (int k = 0; k < ncy; ++k)
@@ -1203,33 +1203,58 @@ bool Bridge::FoundationUnshrouded(BuildingTypeClass* bt, int x, int y)
     return true;
 }
 
+// Native anchor predicate (0x4A8EB0): an own BaseNormal building, or -- with GameModeOptions.BuildOffAlly -- a
+// building whose owner IsAlliedWith(us) (true for self too) and whose type has EligibileForAllyBuilding.
+static bool IsPlaceAnchor(BuildingClass* b, HouseClass* pAgent)
+{
+    if (!b || b->InLimbo || !b->Type || !b->Owner) return false;
+    if (b->Owner == pAgent && b->Type->BaseNormal) return true;
+    return GameModeOptionsClass::Instance.BuildOffAlly && b->Type->EligibileForAllyBuilding && b->Owner->IsAlliedWith(pAgent);
+}
+
+// Upgrade host eligibility (native Unlimbo 0x440871-0x440951; the UI then overrides proximity, 0x4ABA94): the cell's
+// building is an own building of type PowersUpBuilding, anchored exactly at (x,y), with upgrade capacity left.
+static bool UpgradeHostOK(BuildingTypeClass* bt, int x, int y, HouseClass* pAgent)
+{
+    CellStruct cs; cs.X = static_cast<short>(x); cs.Y = static_cast<short>(y);
+    CellClass* c = MapClass::Instance.TryGetCellAt(cs);
+    if (!c) return false;
+    BuildingClass* host = c->GetBuilding();
+    if (!host || host->InLimbo || !host->Type || host->Owner != pAgent) return false;
+    if (lstrcmpiA(host->Type->ID, bt->PowersUpBuilding) != 0) return false;
+    CellStruct m = host->GetMapCoords();
+    if (m.X != x || m.Y != y) return false;
+    int used = 0;
+    for (int i = 0; i < 3; ++i) if (host->Upgrades[i]) ++used;
+    return host->Type->Upgrades > used;
+}
+
 // Human-UI placement preconditions that Building::Unlimbo skips (read-only reimplementation):
-//  * shroud over the whole foundation rectangle (skipped for PowersUpBuilding upgrades, as native);
-//  * proximity (0x4A8EB0), NO wall exemption: the new rectangle must be within Adjacent+1 cells (Chebyshev rect
-//    gap) of an anchor building: an own BaseNormal building, or (GameModeOptions.BuildOffAlly) a building whose
-//    owner considers us allied and whose type has EligibileForAllyBuilding.
+//  * shroud over the whole width x height rectangle, unless the type has ToTile (native 0x4A9186 tests ToTile);
+//  * PowersUpBuilding types: upgrade-host validation REPLACES proximity (and the caller skips CanPlaceHere);
+//  * otherwise proximity (0x4A8EB0), walls included: scan the footprint grown by Adjacent+1 EXCLUDING the proposed
+//    footprint cells, and test the actual cell occupants with the anchor predicate.
 bool Bridge::PlaceAllowed(BuildingTypeClass* bt, int x, int y, HouseClass* pAgent)
 {
     if (!bt || !pAgent) return false;
-    if (bt->PowersUpBuilding[0] == '\0' && !Bridge::FoundationUnshrouded(bt, x, y)) return false;
+    if (!bt->ToTile && !Bridge::FoundationUnshrouded(bt, x, y)) return false;
+    if (bt->PowersUpBuilding[0] != '\0') return UpgradeHostOK(bt, x, y, pAgent);
     const int reach = bt->Adjacent + 1;
     const int w = bt->GetFoundationWidth(), h = bt->GetFoundationHeight(false);
-    const bool offAlly = GameModeOptionsClass::Instance.BuildOffAlly;
-    DynamicVectorClass<BuildingClass*>& bl = BuildingClass::Array;
-    for (int i = 0; i < bl.Count; ++i)
-    {
-        BuildingClass* b = bl.Items[i];
-        if (!b || b->InLimbo || !b->Type || !b->Owner) continue;
-        bool anchor = (b->Owner == pAgent && b->Type->BaseNormal);
-        if (!anchor && offAlly && b->Owner != pAgent && b->Type->EligibileForAllyBuilding && b->Owner->IsAlliedWith(pAgent))
-            anchor = true;
-        if (!anchor) continue;
-        CellStruct m = b->GetMapCoords();
-        const int bw = b->Type->GetFoundationWidth(), bh = b->Type->GetFoundationHeight(false);
-        int gx = x - (m.X + bw - 1); int g2 = m.X - (x + w - 1); if (g2 > gx) gx = g2; if (gx < 0) gx = 0;
-        int gy = y - (m.Y + bh - 1); g2 = m.Y - (y + h - 1); if (g2 > gy) gy = g2; if (gy < 0) gy = 0;
-        if ((gx > gy ? gx : gy) <= reach) return true;
-    }
+    if (w <= 0 || h <= 0 || w > 16 || h > 16) return false;
+    const CellStruct* fd = bt->GetFoundationData(false);
+    for (int cy = y - reach; cy < y + h + reach; ++cy)
+        for (int cx = x - reach; cx < x + w + reach; ++cx)
+        {
+            bool inFoot = false;
+            if (fd)
+                for (int i = 0; i < 256 && !(fd[i].X == 0x7FFF && fd[i].Y == 0x7FFF); ++i)
+                    if (x + fd[i].X == cx && y + fd[i].Y == cy) { inFoot = true; break; }
+            if (inFoot) continue;
+            CellStruct cs; cs.X = static_cast<short>(cx); cs.Y = static_cast<short>(cy);
+            CellClass* c = MapClass::Instance.TryGetCellAt(cs);
+            if (c && IsPlaceAnchor(c->GetBuilding(), pAgent)) return true;
+        }
     return false;
 }
 

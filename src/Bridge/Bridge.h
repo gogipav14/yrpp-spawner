@@ -137,7 +137,7 @@ struct BridgePriv
     uint32_t raw_trk_vehicles;
     uint32_t raw_trk_aircraft;
     uint32_t raw_trk_buildings;
-    uint32_t _pad;
+    uint32_t match_gen;               // bumped by ResetMatch (new match / load / restart); payload is zeroed at reset
 };
 static_assert(sizeof(BridgePriv) == 56, "BridgePriv layout");
 

@@ -44,6 +44,7 @@ namespace
     BridgeOBS* g_obs  = nullptr;
     HANDLE      g_hPriv = nullptr;
     BridgePriv* g_priv  = nullptr;
+    uint32_t    g_privGen = 0;
     std::unordered_map<DWORD, int32_t> g_uidToHandle;
     std::vector<DWORD> g_handleToUid(1, 0u);
 
@@ -150,6 +151,17 @@ namespace
         Bridge::ResetRuleDump();
         Bridge::ResetPlacement();
         Bridge::ResetSeenOre();
+        if (g_priv)   // invalidate the previous match's private payload under its seqlock, bump the generation
+        {
+            volatile uint64_t* ps = &g_priv->pub_seq;
+            *ps = *ps + 1; MemoryBarrier();
+            g_priv->frame_seq = 0; g_priv->status = 0;
+            g_priv->kills_units_by_us = 0; g_priv->kills_buildings_by_us = 0;
+            g_priv->raw_trk_infantry = 0; g_priv->raw_trk_vehicles = 0;
+            g_priv->raw_trk_aircraft = 0; g_priv->raw_trk_buildings = 0;
+            g_priv->match_gen = ++g_privGen;
+            MemoryBarrier(); *ps = *ps + 1;
+        }
         g_uidToHandle.clear();
         g_handleToUid.assign(1, 0u);
         g_agentIdx = -1;
@@ -669,21 +681,23 @@ void Bridge::OnFrame()
     }
 
     o->header.frame_seq = static_cast<uint64_t>(curFrame);
-    Bridge::ReadScore(pAgent, o->score);
+    BridgeScore locScore;   // privileged counters are redacted HERE, before anything touches the shared OBS
+    Bridge::ReadScore(pAgent, locScore);
     // Privileged kill counters leave the public OBS: published to the separate priv mapping, zero here in play.
     BridgePriv privCopy = {};
-    privCopy.kills_units_by_us = o->score.kills_units_by_us;
-    privCopy.kills_buildings_by_us = o->score.kills_buildings_by_us;
-    privCopy.raw_trk_infantry = o->score.raw_trk_infantry;
-    privCopy.raw_trk_vehicles = o->score.raw_trk_vehicles;
-    privCopy.raw_trk_aircraft = o->score.raw_trk_aircraft;
-    privCopy.raw_trk_buildings = o->score.raw_trk_buildings;
+    privCopy.kills_units_by_us = locScore.kills_units_by_us;
+    privCopy.kills_buildings_by_us = locScore.kills_buildings_by_us;
+    privCopy.raw_trk_infantry = locScore.raw_trk_infantry;
+    privCopy.raw_trk_vehicles = locScore.raw_trk_vehicles;
+    privCopy.raw_trk_aircraft = locScore.raw_trk_aircraft;
+    privCopy.raw_trk_buildings = locScore.raw_trk_buildings;
     if (!(g_termBits & 1u))   // after game over the score screen shows these anyway, so the public OBS may carry them
     {
-        o->score.kills_units_by_us = 0; o->score.kills_buildings_by_us = 0;
-        o->score.raw_trk_infantry = 0; o->score.raw_trk_vehicles = 0;
-        o->score.raw_trk_aircraft = 0; o->score.raw_trk_buildings = 0;
+        locScore.kills_units_by_us = 0; locScore.kills_buildings_by_us = 0;
+        locScore.raw_trk_infantry = 0; locScore.raw_trk_vehicles = 0;
+        locScore.raw_trk_aircraft = 0; locScore.raw_trk_buildings = 0;
     }
+    o->score = locScore;
     o->placement_type_id = plType;
     o->placement_rtti    = plRtti;
     o->_pad2             = 0;
@@ -699,6 +713,7 @@ void Bridge::OnFrame()
         volatile uint64_t* ps = &g_priv->pub_seq;
         *ps = *ps + 1; MemoryBarrier();
         g_priv->frame_seq = static_cast<uint64_t>(curFrame);
+        g_priv->match_gen = g_privGen;
         g_priv->status = o->header.status;
         g_priv->kills_units_by_us = privCopy.kills_units_by_us;
         g_priv->kills_buildings_by_us = privCopy.kills_buildings_by_us;
