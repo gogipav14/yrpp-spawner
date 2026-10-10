@@ -704,7 +704,7 @@ void Bridge::OnFrame()
     o->score = locScore;
     o->placement_type_id = plType;
     o->placement_rtti    = plRtti;
-    o->_pad2             = 0;
+    o->place_flags       = Bridge::BulkHintsEnabled() ? 1 : 0;   // v8: bit0 = legacy bulk hints live
     o->n_place           = plN;
     memset(o->place_cells, 0, sizeof(o->place_cells));
     for (int i = 0; i < plN; ++i) o->place_cells[i] = plCells[i];

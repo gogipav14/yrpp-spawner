@@ -16,6 +16,7 @@
 *  re-resolved to a LIVE TechnoClass* each frame by UniqueID (never a stale pointer).
 */
 #include <windows.h>
+#include <cstdlib>
 
 #include "Bridge.h"
 
@@ -171,17 +172,20 @@ namespace
         return ACT_OK;
     }
 
-    ActResult DoPlace(HouseClass* pAgent, const BridgeAction& a)
+    // Shared by PLACE and PROBE_PLACE: request validation (type, naval flag, cell on the playable rect, a matching own building READY to
+    // place) and the cell legality a human gets (shroud + proximity via PlaceAllowed, then CanPlaceHere; upgrades use the host check).
+    // Returns ACT_OK when the request is well formed AND `legal` has been evaluated; any other code is a request error (no legality computed).
+    ActResult PlaceRequest(HouseClass* pAgent, const BridgeAction& a, BuildingTypeClass*& pBT, CellStruct& cell, bool& legal, bool (*budget)())
     {
+        legal = false;
         if (static_cast<AbstractType>(a.category_rtti) != AbstractType::BuildingType)
             return ACT_BAD_RTTI;
         TechnoTypeClass* pTT = TechnoTypeClass::GetByTypeAndIndex(AbstractType::BuildingType, a.type_id);
         if (!pTT)
             return ACT_BAD_INDEX;
-        BuildingTypeClass* pBT = static_cast<BuildingTypeClass*>(pTT);
+        pBT = static_cast<BuildingTypeClass*>(pTT);
         if ((a.is_naval != 0) != pBT->Naval)   // canonical flag only (see DoProduce)
             return ACT_BAD_INDEX;
-        CellStruct cell;
         if (!CellInPlayableRect(a.cell_x, a.cell_y, cell))
             return ACT_PLACE_INVALID_CELL;
         // Human-UI preconditions that Building::Unlimbo (the PLACE event path) does NOT enforce: a matching
@@ -200,13 +204,83 @@ namespace
         }
         if (!ready)
             return ACT_REJECTED_CANBUILD;
-        if (!Bridge::PlaceAllowed(pBT, cell.X, cell.Y, pAgent) ||
-            (pBT->PowersUpBuilding[0] == '\0' && !pBT->CanPlaceHere(&cell, pAgent)))   // upgrades: host check replaces CanPlaceHere
+        if (budget && !budget())                 // PROBE_PLACE only: a bounded number of live legality queries per game-second
+            return ACT_RATE_LIMITED;
+        legal = Bridge::PlaceAllowed(pBT, cell.X, cell.Y, pAgent) &&
+                (pBT->PowersUpBuilding[0] != '\0' || pBT->CanPlaceHere(&cell, pAgent));   // upgrades: the host check in PlaceAllowed replaces CanPlaceHere
+        return ACT_OK;
+    }
+
+    ActResult DoPlace(HouseClass* pAgent, const BridgeAction& a)
+    {
+        BuildingTypeClass* pBT = nullptr;
+        CellStruct cell;
+        bool legal = false;
+        ActResult r = PlaceRequest(pAgent, a, pBT, cell, legal, nullptr);
+        if (r != ACT_OK)
+            return r;
+        if (!legal)
             return ACT_PLACE_INVALID_CELL;
         EventClass ev(pAgent->ArrayIndex, EventType::Place, AbstractType::BuildingType,
             a.type_id, pBT->Naval ? 1 : 0, cell);                // ctor 0x4C6AE0
         EventClass::OutList.Add(ev);
         return ACT_OK;
+    }
+
+    // ---- PROBE_PLACE (M7.1): the hover query.  Same legality as PLACE, but NOTHING is enqueued.  ACT_OK = the cell is legal right now,
+    // ACT_PLACE_INVALID_CELL = it is not (shroud, build radius, terrain, live occupancy: exactly what the hover cursor shows),
+    // ACT_RATE_LIMITED = more than YR_BRIDGE_PROBE_MAX probes were answered in the last game-second (this one was NOT evaluated and costs nothing).
+    // Probes are only answered for a building that is READY to place (a human hovers a cell only while holding one), with the same request
+    // validation as PLACE.  The budget is a sliding window over answered probes; the frame counter going backwards (new match) clears it.
+    constexpr int PROBE_WINDOW_FRAMES = 60;      // one game-second = 60 logic frames (matches the harness FPS)
+    constexpr int PROBE_DEFAULT_MAX   = 4;
+    constexpr int PROBE_HARD_MAX      = 64;
+    int g_probeMax = -1;                         // resolved lazily from env YR_BRIDGE_PROBE_MAX (0 disables probes)
+    int g_probeFrames[PROBE_HARD_MAX];
+    int g_probeN = 0;
+
+    int ProbeMax()
+    {
+        if (g_probeMax < 0)
+        {
+            g_probeMax = PROBE_DEFAULT_MAX;
+            char e[16] = {};
+            if (GetEnvironmentVariableA("YR_BRIDGE_PROBE_MAX", e, sizeof(e)) > 0)
+            {
+                char* end = nullptr;
+                long v = strtol(e, &end, 10);
+                if (end != e && *end == '\0' && v >= 0)
+                    g_probeMax = static_cast<int>(v > PROBE_HARD_MAX ? PROBE_HARD_MAX : v);
+            }
+            Debug::Log("[BRIDGE] probe budget: %d per game-second (%d frames)\n", g_probeMax, PROBE_WINDOW_FRAMES);
+        }
+        return g_probeMax;
+    }
+
+    bool ProbeBudgetTake()
+    {
+        const int f = static_cast<int>(Unsorted::CurrentFrame);
+        const int mx = ProbeMax();
+        int n = 0;
+        for (int i = 0; i < g_probeN; ++i)
+            if (g_probeFrames[i] <= f && f - g_probeFrames[i] < PROBE_WINDOW_FRAMES)
+                g_probeFrames[n++] = g_probeFrames[i];       // keep the live window (also drops entries from a previous match)
+        g_probeN = n;
+        if (g_probeN >= mx)
+            return false;
+        g_probeFrames[g_probeN++] = f;
+        return true;
+    }
+
+    ActResult DoProbePlace(HouseClass* pAgent, const BridgeAction& a)
+    {
+        BuildingTypeClass* pBT = nullptr;
+        CellStruct cell;
+        bool legal = false;
+        ActResult r = PlaceRequest(pAgent, a, pBT, cell, legal, &ProbeBudgetTake);
+        if (r != ACT_OK)
+            return r;
+        return legal ? ACT_OK : ACT_PLACE_INVALID_CELL;
     }
 
     // v1: single-unit move / attack-move to a cell (groups deferred).
@@ -314,6 +388,7 @@ namespace
         case ActType::NOOP:         return ACT_NOOP;
         case ActType::PRODUCE:      return DoProduce(pAgent, a);
         case ActType::PLACE:        return DoPlace(pAgent, a);
+        case ActType::PROBE_PLACE:  return DoProbePlace(pAgent, a);
         case ActType::DEPLOY:       return EmitWhomEvent(pAgent, EventType::Deploy,  ResolveTechno(a.target_unique));
         case ActType::SET_PRIMARY:  return EmitWhomEvent(pAgent, EventType::Primary, ResolveTechno(a.target_unique));
         case ActType::SELL:         return EmitWhomEvent(pAgent, EventType::Sell,    ResolveTechno(a.target_unique));

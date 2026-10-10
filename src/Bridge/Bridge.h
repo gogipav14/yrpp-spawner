@@ -19,7 +19,7 @@ class BuildingTypeClass;
 namespace BridgeContract
 {
     constexpr uint32_t MAGIC     = 0x59524252u; // 'YRBR'
-    constexpr uint32_t VERSION   = 7u;          // v7: + BridgeScore (12 x u32 score-screen counters) before step_k; v6: + placement hints (type/rtti/n/cells[64]) before step_*; v5: + step_k/step_timeouts/step_decisions before pub_seq (v4: pub_seq seqlock, v3: spatial grid)
+    constexpr uint32_t VERSION   = 8u;          // v8: SAME size as v7; the former placement _pad2 byte is now place_flags (bit0 = bulk legal-cell hints LIVE; default OFF, n_place==0) -- semantics change only; v7: + BridgeScore (12 x u32 score-screen counters) before step_k; v6: + placement hints (type/rtti/n/cells[64]) before step_*; v5: + step_k/step_timeouts/step_decisions before pub_seq (v4: pub_seq seqlock, v3: spatial grid)
     constexpr int      N_OWN     = 256;
     constexpr int      N_ENEMY   = 256;
     constexpr int      N_FACTORY = 16;          // max own factories surfaced
@@ -41,6 +41,7 @@ enum class ActType : uint8_t
     GROUP_MOVE = 5, GROUP_ATTACK = 6, GROUP_FORM = 7, SUPERWEAPON = 8, STANCE = 9,
     DEPLOY = 10,   // deploy a deployable unit (e.g. MCV -> Construction Yard) by target_unique
     STOP = 11,     // EventType::Idle for own unit target_unique (human 'S' key)
+    PROBE_PLACE = 13, // M7.1: hover query -- legality of (type_id, cell) for the READY building, answered in the ACK result (OK = legal, PLACE_INVALID_CELL = not), no event; budgeted per game-second
     GUARD = 12,    // MegaMission Mission::Guard (stance 0) / Mission::Area_Guard (stance 1) for own unit (human 'G' key)
 };
 
@@ -50,6 +51,7 @@ enum ActResult : uint32_t
     ACT_OK = 0, ACT_NOOP = 1, ACT_REJECTED_CANBUILD = 2, ACT_REJECTED_NOFACTORY = 3,
     ACT_BAD_TARGET = 4, ACT_BAD_RTTI = 5, ACT_BAD_INDEX = 6, ACT_PLACE_INVALID_CELL = 7,
     ACT_NO_AGENT = 8, ACT_UNSUPPORTED = 9,
+    ACT_RATE_LIMITED = 10,   // PROBE_PLACE over the per-game-second probe budget (YR_BRIDGE_PROBE_MAX): not evaluated
 };
 
 #pragma pack(push, 1)
@@ -163,7 +165,7 @@ struct BridgeOBS
     // BuildingTypeClass::CanPlaceHere(cell, agent) is true, sorted by dist ascending.
     int32_t       placement_type_id;  // BuildingType array index, -1 when nothing is ready
     uint8_t       placement_rtti;     // AbstractType::BuildingType when ready, else 0
-    uint8_t       _pad2;
+    uint8_t       place_flags;        // v8 bit0: place_cells are LIVE bulk hints (env YR_BRIDGE_PLACE_HINTS=1, legacy). 0 = public mode: n_place is always 0
     uint16_t      n_place;            // valid entries in place_cells
     BridgePlaceCell place_cells[BridgeContract::N_PLACE];
     // v7 score-screen counters for the agent house (same data the end-game score screen shows).
@@ -258,4 +260,6 @@ namespace Bridge
     const char* ActName();
     // YR_BRIDGE_UNCAP=1 (opt-in): the 0x55E2B4 hook skips the frame-rate limiter wait.
     bool UncapEnabled();
+    // YR_BRIDGE_PLACE_HINTS=1 (legacy, default OFF): publish the bulk legal-placement cell list in the OBS (it reflects hidden occupants; see docs).
+    bool BulkHintsEnabled();
 }

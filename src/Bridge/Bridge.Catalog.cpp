@@ -1192,6 +1192,20 @@ namespace
     }
 }
 
+bool Bridge::BulkHintsEnabled()
+{
+    // M7.1: the bulk legal-cell list is a live-occupancy oracle (CanPlaceHere on up to ~12000 cells sees cloaked / tunnelled / disguised
+    // occupants a human only learns per hover).  OFF by default; YR_BRIDGE_PLACE_HINTS=1 restores the pre-M7.1 behaviour (legacy profiles).
+    static int on = -1;
+    if (on < 0)
+    {
+        char e[8] = {};
+        on = (GetEnvironmentVariableA("YR_BRIDGE_PLACE_HINTS", e, sizeof(e)) > 0 && e[0] == '1') ? 1 : 0;
+        Debug::Log("[BRIDGE] bulk placement hints: %s\n", on ? "ON (legacy, YR_BRIDGE_PLACE_HINTS=1)" : "OFF (public candidates + PROBE_PLACE)");
+    }
+    return on == 1;
+}
+
 void Bridge::ResetPlacement()
 {
     g_cacheN = 0;
@@ -1214,6 +1228,15 @@ void Bridge::UpdatePlacement(HouseClass* pAgent, int frame, bool decision, bool 
         return;
     }
     const int typeIdx = bt->ArrayIndex;
+    if (!Bridge::BulkHintsEnabled())
+    {
+        // public mode: only the ready type (own factory state) is published; NO live occupancy scan, n_place stays 0
+        outType = typeIdx;
+        outRtti = static_cast<uint8_t>(AbstractType::BuildingType);
+        g_cacheType = typeIdx;
+        g_cacheN = 0;
+        return;
+    }
     const int bc = pAgent->Buildings.Count;
     const bool changed = (typeIdx != g_cacheType) || (bc != g_cacheBldCount);
     const bool due = lockstep ? decision : (frame - g_lastComputeFrame >= 15);
