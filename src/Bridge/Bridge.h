@@ -51,7 +51,7 @@ enum ActResult : uint32_t
     ACT_OK = 0, ACT_NOOP = 1, ACT_REJECTED_CANBUILD = 2, ACT_REJECTED_NOFACTORY = 3,
     ACT_BAD_TARGET = 4, ACT_BAD_RTTI = 5, ACT_BAD_INDEX = 6, ACT_PLACE_INVALID_CELL = 7,
     ACT_NO_AGENT = 8, ACT_UNSUPPORTED = 9,
-    ACT_RATE_LIMITED = 10,   // PROBE_PLACE over the per-game-second probe budget (YR_BRIDGE_PROBE_MAX): not evaluated
+    ACT_RATE_LIMITED = 10,   // PROBE_PLACE or PLACE over the shared per-game-second legality-query budget (YR_BRIDGE_PROBE_MAX): not evaluated
 };
 
 #pragma pack(push, 1)

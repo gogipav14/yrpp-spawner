@@ -175,6 +175,8 @@ namespace
     // Shared by PLACE and PROBE_PLACE: request validation (type, naval flag, cell on the playable rect, a matching own building READY to
     // place) and the cell legality a human gets (shroud + proximity via PlaceAllowed, then CanPlaceHere; upgrades use the host check).
     // Returns ACT_OK when the request is well formed AND `legal` has been evaluated; any other code is a request error (no legality computed).
+    bool ProbeBudgetTake();
+
     ActResult PlaceRequest(HouseClass* pAgent, const BridgeAction& a, BuildingTypeClass*& pBT, CellStruct& cell, bool& legal, bool (*budget)())
     {
         legal = false;
@@ -216,7 +218,7 @@ namespace
         BuildingTypeClass* pBT = nullptr;
         CellStruct cell;
         bool legal = false;
-        ActResult r = PlaceRequest(pAgent, a, pBT, cell, legal, nullptr);
+        ActResult r = PlaceRequest(pAgent, a, pBT, cell, legal, &ProbeBudgetTake);   // a PLACE is also a live legality query: it shares the probe budget
         if (r != ACT_OK)
             return r;
         if (!legal)
@@ -227,7 +229,7 @@ namespace
         return ACT_OK;
     }
 
-    // ---- PROBE_PLACE (M7.1): the hover query.  Same legality as PLACE, but NOTHING is enqueued.  ACT_OK = the cell is legal right now,
+    // ---- PROBE_PLACE (M7.1): the hover query (the budget below is SHARED with PLACE: every live legality query, legal or not, takes one token).  Same legality as PLACE, but NOTHING is enqueued.  ACT_OK = the cell is legal right now,
     // ACT_PLACE_INVALID_CELL = it is not (shroud, build radius, terrain, live occupancy: exactly what the hover cursor shows),
     // ACT_RATE_LIMITED = more than YR_BRIDGE_PROBE_MAX probes were answered in the last game-second (this one was NOT evaluated and costs nothing).
     // Probes are only answered for a building that is READY to place (a human hovers a cell only while holding one), with the same request
