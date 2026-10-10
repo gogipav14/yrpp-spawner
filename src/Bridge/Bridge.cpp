@@ -36,6 +36,8 @@
 #include <Utilities/Debug.h>
 #include <GameModeOptionsClass.h>
 #include <ObjectTypeClass.h>
+#include <OverlayTypeClass.h>
+#include <TerrainClass.h>
 #include <FootClass.h>
 #include <LocomotionClass.h>
 
@@ -301,6 +303,31 @@ namespace
         if (!owner->Type || owner->IsNeutral() || owner->IsInitiallyObserver())
             return 2;
         return 1;
+    }
+
+
+    // Human-equivalent STATIC buildability of one cell (the cell must be explored; the caller handles shroud).
+    // Mirrors the static tail of the engine's own check CellClass::CanThisExistHere (0x47C620, SpeedType == -1 path at
+    // 0x47C9CD..0x47CA40, verified in disassembly): not a bridge cell (CellFlags BridgeHead 0x100 / BridgeBody 0x400),
+    // SlopeIndex == 0 (ramps/slopes), and GroundType::Array[LandType].Buildable (rules [Clear]/[Road] yes; [Water]/[Rock]/
+    // [Rough]/[Beach]... no). Overlays: a WALL overlay blocks (visible in explored cells); tiberium/ore does not (LandType
+    // Tiberium is a buildable ground type). Trees / other TerrainClass objects are static map features a human sees, so
+    // they count as not buildable. Units, buildings and infantry are NOT considered (occupancy is the PROBE_PLACE job).
+    bool StaticBuildable(CellClass* c)
+    {
+        if (static_cast<unsigned int>(c->Flags) & (0x100u | 0x400u)) return false;
+        if (c->SlopeIndex != 0) return false;
+        const int lt = static_cast<int>(c->LandType);
+        if (lt < 0 || lt >= 12 || !GroundType::Array[lt].Buildable) return false;
+        const int ov = c->OverlayTypeIndex;
+        if (ov >= 0 && ov < OverlayTypeClass::Array.Count)
+        {
+            OverlayTypeClass* ot = OverlayTypeClass::Array.Items[ov];
+            if (ot && ot->Wall) return false;
+        }
+        for (ObjectClass* o = c->FirstObject; o; o = o->NextObject)
+            if (o->WhatAmI() == AbstractType::Terrain) return false;
+        return true;
     }
 
     // Playable-area test: same MapCoordBounds the spatial grid uses (a cell outside it is not part of
@@ -626,6 +653,7 @@ void Bridge::OnFrame()
     // are written ONLY where the cell is visible right now (same gate as the entity loop).
     {
         memset(o->grid, 0, sizeof(o->grid));
+        memset(o->terrain, 0, sizeof(o->terrain));
         const LTRBStruct& mb = MapClass::Instance.MapCoordBounds;
         const int minX = mb.Left, minY = mb.Top;
         int mapW = (mb.Right - mb.Left) + 1;
@@ -635,6 +663,12 @@ void Bridge::OnFrame()
         o->grid_map_w = static_cast<uint16_t>(mapW);
         o->grid_map_h = static_cast<uint16_t>(mapH);
         const int G = BridgeContract::GRID_DIM;
+        const int tW = mapW < BridgeContract::TERRAIN_MAX_DIM ? mapW : BridgeContract::TERRAIN_MAX_DIM;
+        const int tH = mapH < BridgeContract::TERRAIN_MAX_DIM ? mapH : BridgeContract::TERRAIN_MAX_DIM;
+        o->terrain_x0 = static_cast<uint16_t>(minX < 0 ? 0 : minX);
+        o->terrain_y0 = static_cast<uint16_t>(minY < 0 ? 0 : minY);
+        o->terrain_w = static_cast<uint16_t>(tW);
+        o->terrain_h = static_cast<uint16_t>(tH);
 
         for (int cy = 0; cy < mapH; ++cy)
         {
@@ -654,6 +688,11 @@ void Bridge::OnFrame()
                 // Terrain channels (0 passability, 6 height) are gated PER SOURCE CELL before downsampling:
                 // shrouded cells contribute nothing (stay 0 = unknown), so no hidden cell leaks via aggregation.
                 const bool shrouded = c->IsShrouded();
+                if (!shrouded && cx < tW && cy < tH)
+                {   // per-cell static terrain: 1 buildable, 2 not buildable; shrouded cells stay 0
+                    const int ti = cy * tW + cx;
+                    o->terrain[ti >> 2] |= static_cast<uint8_t>((StaticBuildable(c) ? 1 : 2) << ((ti & 3) * 2));
+                }
                 if (!shrouded)
                     o->grid[0][gy][gx] = static_cast<uint8_t>((static_cast<int>(c->Passability) * 255) / 7);
                 int ore = Bridge::SeenOre(c);   // shroud/fog-gated (0 unexplored, last-seen under fog)

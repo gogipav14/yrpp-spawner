@@ -19,12 +19,14 @@ class BuildingTypeClass;
 namespace BridgeContract
 {
     constexpr uint32_t MAGIC     = 0x59524252u; // 'YRBR'
-    constexpr uint32_t VERSION   = 8u;          // v8: SAME size as v7; the former placement _pad2 byte is now place_flags (bit0 = bulk legal-cell hints LIVE; default OFF, n_place==0) -- semantics change only; v7: + BridgeScore (12 x u32 score-screen counters) before step_k; v6: + placement hints (type/rtti/n/cells[64]) before step_*; v5: + step_k/step_timeouts/step_decisions before pub_seq (v4: pub_seq seqlock, v3: spatial grid)
+    constexpr uint32_t VERSION   = 9u;          // v9: + per-cell static terrain layer (terrain_x0/y0/w/h + 2-bit packed cells) between score and step_k; v8: placement _pad2 byte = place_flags (semantics only);           // v8: SAME size as v7; the former placement _pad2 byte is now place_flags (bit0 = bulk legal-cell hints LIVE; default OFF, n_place==0) -- semantics change only; v7: + BridgeScore (12 x u32 score-screen counters) before step_k; v6: + placement hints (type/rtti/n/cells[64]) before step_*; v5: + step_k/step_timeouts/step_decisions before pub_seq (v4: pub_seq seqlock, v3: spatial grid)
     constexpr int      N_OWN     = 256;
     constexpr int      N_ENEMY   = 256;
     constexpr int      N_FACTORY = 16;          // max own factories surfaced
     constexpr int      N_PLACE   = 64;          // legal placement cells surfaced
     constexpr int      GRID_DIM      = 64;      // downsampled spatial grid, H = W = 64
+    constexpr int      TERRAIN_MAX_DIM = 256;   // per-cell terrain layer covers at most 256 x 256 cells (row-major, 2 bits per cell, 4 cells per byte)
+    constexpr int      TERRAIN_BYTES = TERRAIN_MAX_DIM * TERRAIN_MAX_DIM / 4;   // 16384
     constexpr int      GRID_CHANNELS = 7;       // passability,ore,fog,own_units,enemy_units,own_buildings,height
     constexpr char     OBS_NAME[] = "Local\\yr_bridge_obs";
     constexpr char     PRIV_NAME[] = "Local\\yr_bridge_priv";   // privileged reward-only mapping (+ _<YR_BRIDGE_ID>)
@@ -170,6 +172,15 @@ struct BridgeOBS
     BridgePlaceCell place_cells[BridgeContract::N_PLACE];
     // v7 score-screen counters for the agent house (same data the end-game score screen shows).
     BridgeScore   score;
+    // v9 per-cell STATIC terrain (human-equivalent: exact terrain of EXPLORED cells, no occupants). Cell (x,y) in map coords:
+    // lx = x - terrain_x0, ly = y - terrain_y0 (0 <= lx < terrain_w, 0 <= ly < terrain_h); i = ly * terrain_w + lx;
+    // code = (terrain[i >> 2] >> ((i & 3) * 2)) & 3 : 0 unknown (shrouded / off map), 1 explored + buildable static terrain,
+    // 2 explored + not buildable (water, cliff/rock, rough, slope, bridge, walls, trees...), 3 reserved.
+    uint16_t      terrain_x0;   // MapCoordBounds.Left
+    uint16_t      terrain_y0;   // MapCoordBounds.Top
+    uint16_t      terrain_w;    // min(map width, 256)
+    uint16_t      terrain_h;    // min(map height, 256)
+    uint8_t       terrain[BridgeContract::TERRAIN_BYTES];
     // v5 lockstep info (always written; step_k==0 means free-run, the other two stay 0).
     uint32_t      step_k;          // YR_BRIDGE_STEP (1..600) if the lockstep events exist, else 0
     uint32_t      step_timeouts;   // cumulative go-wait timeouts since process start
@@ -211,7 +222,7 @@ static_assert(sizeof(BridgeEntity)  == 16, "BridgeEntity layout changed");
 static_assert(sizeof(BridgeFactory) == 12, "BridgeFactory layout changed");
 static_assert(sizeof(BridgePlaceCell) == 6, "BridgePlaceCell layout changed");
 static_assert(sizeof(BridgeScore) == 48, "BridgeScore layout changed");
-static_assert(sizeof(BridgeOBS) == 24 + 36 + 8 + 256 * 16 + 256 * 16 + 16 * 12 + 7 * 64 * 64 + 4 + (8 + 64 * 6) + 48 + 12 + 8, "BridgeOBS layout changed");
+static_assert(sizeof(BridgeOBS) == 24 + 36 + 8 + 256 * 16 + 256 * 16 + 16 * 12 + 7 * 64 * 64 + 4 + (8 + 64 * 6) + 48 + (8 + 16384) + 12 + 8, "BridgeOBS layout changed");
 static_assert(sizeof(BridgeAction)  == 24, "BridgeAction layout changed");
 static_assert(sizeof(BridgeACT) == 24 + 8 + 8 + 4 + 24, "BridgeACT layout changed");
 
